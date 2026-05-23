@@ -833,3 +833,81 @@ def detect_position_collisions(variants_nodes_root: _Path) -> list[dict]:
             "confirmed": False,
         })
     return collisions
+
+
+def detect_decisional_asymmetry(
+    variants_nodes_root: _Path,
+    decisions: dict[str, Decision],
+) -> list[dict]:
+    """Find decisions where >=1 variant is `decided` and >=1 is `out_of_scope`.
+
+    Considers ONLY registered (non-retired) decisions. Unaddressed silence
+    does NOT trigger (per spec §5.2 Detector 2).
+
+    Returns entries: {"decision_id": ..., "per_variant": [{variant, status,
+    position|out_of_scope_rationale}, ...]}.
+    """
+    grouped = _walk_claims(variants_nodes_root)
+    entries: list[dict] = []
+    for decision_id, per_variant in sorted(grouped.items()):
+        if decision_id not in decisions:
+            continue
+        if decisions[decision_id].status == "retired":
+            continue
+        # Per-variant latest claim
+        per_variant_status: list[dict] = []
+        for variant_name, claim_list in per_variant.items():
+            latest = max(claim_list, key=lambda c: c["id"])
+            ct = latest.get("claim_type")
+            if ct == "out_of_scope":
+                per_variant_status.append({
+                    "variant": variant_name, "status": "out_of_scope",
+                    "claim_id": latest["id"],
+                    "out_of_scope_rationale": latest.get("out_of_scope_rationale"),
+                })
+            elif ct in ("decision", "observation", "inference") and latest.get("position"):
+                per_variant_status.append({
+                    "variant": variant_name, "status": "decided",
+                    "claim_id": latest["id"],
+                    "position": latest["position"],
+                })
+            # unresolved or no-position: don't count as either status for asymmetry
+        statuses = {v["status"] for v in per_variant_status}
+        if "decided" in statuses and "out_of_scope" in statuses:
+            entries.append({
+                "decision_id": decision_id,
+                "per_variant": sorted(per_variant_status, key=lambda v: v["variant"]),
+            })
+    return entries
+
+
+def detect_stale_proposals(
+    decisions: dict[str, Decision],
+    introduced_round: dict[str, int],
+    current_round: int,
+    threshold: int = 5,
+) -> list[dict]:
+    """Find `proposed` decisions older than `threshold` rounds.
+
+    Args:
+        decisions: full registry from derived/decisions.json
+        introduced_round: {decision_id: round_number_when_first_proposed}
+        current_round: the current round number
+        threshold: max rounds a proposal may remain `proposed` before stale
+    """
+    stale: list[dict] = []
+    for decision_id, dec in sorted(decisions.items()):
+        if dec.status != "proposed":
+            continue
+        intro = introduced_round.get(decision_id)
+        if intro is None:
+            continue
+        age = current_round - intro
+        if age >= threshold:
+            stale.append({
+                "decision_id": decision_id,
+                "question": dec.question,
+                "rounds_since_proposal": age,
+                "introduced_round": intro,
+            })
+    return stale
