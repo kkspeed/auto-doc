@@ -329,6 +329,83 @@ class CanonicalSlugRegistry:
             self.data[decision_id] = {"canonical": [], "aliases": {}}
 
 
+# ----- Cross-field validators -------------------------------------------------
+
+
+def validate_claim_decision_id_resolution(
+    claim: Claim,
+    decisions: dict[str, Decision],
+) -> None:
+    """Verify claim.decision_id resolves to a non-retired registered decision
+    OR matches the claim's proposed_decision payload.
+
+    Args:
+        claim: the Claim to validate
+        decisions: {decision_id: Decision} from derived/decisions.json
+    Raises:
+        SchemaError on validation failure.
+    """
+    if claim.decision_id in decisions:
+        registered = decisions[claim.decision_id]
+        if registered.status == "retired":
+            raise SchemaError(
+                f"Claim {claim.id} references retired decision {claim.decision_id!r}; "
+                "new claims may not reference retired decisions"
+            )
+        # status open or proposed; OK
+        return
+    # Not in registry; must have proposed_decision payload with matching id
+    if claim.proposed_decision is None:
+        raise SchemaError(
+            f"Claim {claim.id} decision_id {claim.decision_id!r} is not registered "
+            "and no proposed_decision payload is present"
+        )
+    if claim.proposed_decision.get("id") != claim.decision_id:
+        raise SchemaError(
+            f"Claim {claim.id} proposed_decision.id "
+            f"({claim.proposed_decision.get('id')!r}) does not match "
+            f"decision_id ({claim.decision_id!r})"
+        )
+
+
+def validate_claim_position_not_vacuous(claim: Claim) -> None:
+    """Reject vacuous position slugs (tbd, unclear, etc.).
+
+    No-op for out_of_scope and unresolved claims (they have no position).
+    """
+    if claim.position is None:
+        return
+    if claim.position in VACUOUS_POSITION_SLUGS:
+        raise SchemaError(
+            f"Claim {claim.id} has vacuous position slug {claim.position!r}; "
+            f"use claim_type=unresolved if you genuinely lack a position"
+        )
+
+
+def validate_claim_position_not_alias(
+    claim: Claim,
+    registry: CanonicalSlugRegistry,
+) -> None:
+    """Reject claims whose position slug is an alias key in the registry for the
+    claim's decision_id (designer must use the canonical slug).
+
+    No-op for claims with no position, or for decisions absent from the registry.
+    """
+    if claim.position is None:
+        return
+    entry = registry.data.get(claim.decision_id)
+    if entry is None:
+        return
+    aliases = entry.get("aliases", {})
+    if claim.position in aliases:
+        canonical = aliases[claim.position]
+        raise SchemaError(
+            f"Claim {claim.id} position {claim.position!r} is an alias of "
+            f"canonical {canonical!r} under decision {claim.decision_id!r}; "
+            f"use the canonical slug"
+        )
+
+
 # ----- DecisionProposalVerdict ------------------------------------------------
 
 
