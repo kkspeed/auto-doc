@@ -668,3 +668,78 @@ def register_decision(
     new_text = new_text.rstrip() + "\n" + "".join(appended_blocks)
     goal_toml_path.write_text(new_text)
     return new_version
+
+
+# ----- Canonicalization apply (Flow C high-confidence) ------------------------
+
+
+def apply_canonicalization(
+    variants_nodes_root: _Path,
+    registry: CanonicalSlugRegistry,
+    decision_id: str,
+    from_slug: str,
+    to_slug: str,
+) -> list[dict]:
+    """Apply a high-confidence canonicalization across all variants.
+
+    Walks all v-*/claims/cl-*.json files under variants_nodes_root and rewrites
+    `position: from_slug → to_slug` where `decision_id` matches. Then updates
+    the registry via register_alias (from_slug becomes alias of to_slug).
+
+    Returns a list of {"path": ..., "claim_id": ..., "from": ..., "to": ...,
+    "decision_id": ...} entries — one per file rewritten. Empty list if no
+    files matched. Suitable for the Action: canonicalize commit trailer.
+
+    Raises RegistryInvariantError if the registry invariants reject the alias
+    (caller should not have attempted with invalid to_slug).
+    """
+    # Validate the registry transition BEFORE touching files, so a bad call
+    # leaves the filesystem alone.
+    entry = registry.data.get(decision_id)
+    if entry is None:
+        raise RegistryInvariantError(
+            f"Decision {decision_id!r} not in registry"
+        )
+    if to_slug not in entry["canonical"]:
+        raise RegistryInvariantError(
+            f"Alias target {to_slug!r} is not canonical for {decision_id!r}"
+        )
+    if from_slug not in entry["canonical"]:
+        raise RegistryInvariantError(
+            f"Slug {from_slug!r} is not canonical for {decision_id!r}"
+        )
+    if from_slug in entry["aliases"]:
+        raise RegistryInvariantError(
+            f"Slug {from_slug!r} is already an alias"
+        )
+
+    rewrites: list[dict] = []
+    if variants_nodes_root.exists():
+        for variant_dir in sorted(variants_nodes_root.iterdir()):
+            if not variant_dir.is_dir():
+                continue
+            claims_dir = variant_dir / "claims"
+            if not claims_dir.exists():
+                continue
+            for cl_file in sorted(claims_dir.glob("cl-*.json")):
+                with cl_file.open() as f:
+                    data = _json.load(f)
+                if data.get("decision_id") != decision_id:
+                    continue
+                if data.get("position") != from_slug:
+                    continue
+                data["position"] = to_slug
+                with cl_file.open("w") as f:
+                    _json.dump(data, f, indent=2, sort_keys=True)
+                rewrites.append({
+                    "path": str(cl_file.relative_to(variants_nodes_root.parent.parent)),
+                    "claim_id": data["id"],
+                    "decision_id": decision_id,
+                    "from": from_slug,
+                    "to": to_slug,
+                })
+
+    # Commit the registry change AFTER rewriting files (so files+registry stay
+    # in sync; if rewrite fails partway, no registry mutation has occurred).
+    register_alias(registry, decision_id, from_slug, to_slug)
+    return rewrites
