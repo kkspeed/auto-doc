@@ -683,15 +683,24 @@ def apply_canonicalization(
     """Apply a high-confidence canonicalization across all variants.
 
     Walks all v-*/claims/cl-*.json files under variants_nodes_root and rewrites
-    `position: from_slug → to_slug` where `decision_id` matches. Then updates
-    the registry via register_alias (from_slug becomes alias of to_slug).
+    `position: from_slug → to_slug` where `decision_id` matches.
+
+    Ordering: validate invariants → mutate registry via register_alias → walk
+    files. If the file walk fails partway, the registry mutation has already
+    been committed; subsequent rounds will rewrite stragglers because
+    validate_claim_position_not_alias will reject incoming claims using the
+    now-aliased slug, and the orchestrator-driven rewriter (Tasks 3 + this
+    function called on a subsequent round) finishes the job.
 
     Returns a list of {"path": ..., "claim_id": ..., "from": ..., "to": ...,
     "decision_id": ...} entries — one per file rewritten. Empty list if no
     files matched. Suitable for the Action: canonicalize commit trailer.
 
-    Raises RegistryInvariantError if the registry invariants reject the alias
-    (caller should not have attempted with invalid to_slug).
+    Raises RegistryInvariantError if:
+      - variants_nodes_root does not exist (misconfiguration; refuse rather
+        than silently update registry against a missing workspace)
+      - the registry invariants reject the alias (caller should not have
+        attempted with invalid to_slug, but defensive re-check)
     """
     # Validate the registry transition BEFORE touching files, so a bad call
     # leaves the filesystem alone.
@@ -713,33 +722,41 @@ def apply_canonicalization(
             f"Slug {from_slug!r} is already an alias"
         )
 
-    rewrites: list[dict] = []
-    if variants_nodes_root.exists():
-        for variant_dir in sorted(variants_nodes_root.iterdir()):
-            if not variant_dir.is_dir():
-                continue
-            claims_dir = variant_dir / "claims"
-            if not claims_dir.exists():
-                continue
-            for cl_file in sorted(claims_dir.glob("cl-*.json")):
-                with cl_file.open() as f:
-                    data = _json.load(f)
-                if data.get("decision_id") != decision_id:
-                    continue
-                if data.get("position") != from_slug:
-                    continue
-                data["position"] = to_slug
-                with cl_file.open("w") as f:
-                    _json.dump(data, f, indent=2, sort_keys=True)
-                rewrites.append({
-                    "path": str(cl_file.relative_to(variants_nodes_root.parent.parent)),
-                    "claim_id": data["id"],
-                    "decision_id": decision_id,
-                    "from": from_slug,
-                    "to": to_slug,
-                })
+    if not variants_nodes_root.exists():
+        raise RegistryInvariantError(
+            f"variants_nodes_root {variants_nodes_root} does not exist; "
+            "refusing to canonicalize against a missing workspace"
+        )
 
-    # Commit the registry change AFTER rewriting files (so files+registry stay
-    # in sync; if rewrite fails partway, no registry mutation has occurred).
+    # Mutate the registry FIRST, files SECOND. If file walk fails midway, the
+    # registry is already updated to mark from→aliased, so future rounds will
+    # gradually rewrite stragglers via validate_claim_position_not_alias rejecting
+    # them at commit time. The reverse order (files first) would leave a state
+    # where partial file mutations have no recovery path.
     register_alias(registry, decision_id, from_slug, to_slug)
+
+    rewrites: list[dict] = []
+    for variant_dir in sorted(variants_nodes_root.iterdir()):
+        if not variant_dir.is_dir():
+            continue
+        claims_dir = variant_dir / "claims"
+        if not claims_dir.exists():
+            continue
+        for cl_file in sorted(claims_dir.glob("cl-*.json")):
+            with cl_file.open() as f:
+                data = _json.load(f)
+            if data.get("decision_id") != decision_id:
+                continue
+            if data.get("position") != from_slug:
+                continue
+            data["position"] = to_slug
+            with cl_file.open("w") as f:
+                _json.dump(data, f, indent=2, sort_keys=True)
+            rewrites.append({
+                "path": str(cl_file.relative_to(variants_nodes_root.parent.parent)),
+                "claim_id": data["id"],
+                "decision_id": decision_id,
+                "from": from_slug,
+                "to": to_slug,
+            })
     return rewrites

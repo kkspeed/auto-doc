@@ -1,4 +1,5 @@
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,9 @@ class ApplyCanonicalizationTest(unittest.TestCase):
         self.variants = self.td / "variants" / "nodes"
         self.v1 = self.variants / "v-001"
         self.v2 = self.variants / "v-002"
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
 
     def test_apply_rewrites_slug_in_cl_files(self):
         f1 = _write_cl(self.v1, "cl-000001", "retry-policy", "exponential-backoff")
@@ -98,6 +102,23 @@ class ApplyCanonicalizationTest(unittest.TestCase):
         # Registry still updated
         self.assertNotIn("exponential-backoff",
                          registry.data["retry-policy"]["canonical"])
+
+
+    def test_apply_raises_when_variants_root_missing(self):
+        # variants_nodes_root doesn't exist → should refuse, not silently update registry
+        registry = cg.CanonicalSlugRegistry()
+        cg.add_canonical_position(registry, "retry-policy", "expo-backoff")
+        cg.add_canonical_position(registry, "retry-policy", "exponential-backoff")
+        missing = self.td / "no-such-variants"
+        with self.assertRaises(cg.RegistryInvariantError) as cm:
+            cg.apply_canonicalization(
+                missing, registry, "retry-policy",
+                from_slug="exponential-backoff", to_slug="expo-backoff",
+            )
+        self.assertIn("does not exist", str(cm.exception))
+        # Registry must NOT have been updated
+        self.assertIn("exponential-backoff", registry.data["retry-policy"]["canonical"])
+        self.assertNotIn("exponential-backoff", registry.data["retry-policy"]["aliases"])
 
 
 if __name__ == "__main__":
