@@ -630,22 +630,30 @@ def register_decision(
     Each entry in new_decisions: {"id": "...", "question": "...", "rationale": "..."}.
     The rationale is preserved as a comment in goal.toml above the [[decision]] block.
 
-    Raises SchemaError on duplicate id, invalid slug, or unparseable goal_version.
+    Raises SchemaError on: empty new_decisions list, duplicate id (existing or
+    within batch), missing required field, invalid slug, or unparseable goal_version.
     """
+    if not new_decisions:
+        raise SchemaError("register_decision: new_decisions list cannot be empty")
     text = goal_toml_path.read_text()
     existing, _ = load_decisions_from_goal_toml(goal_toml_path)
-    new_text, new_version = _bump_goal_version(text)
-    appended_blocks: list[str] = []
+    seen_ids = set(existing.keys())
+    # Validate ALL entries before any mutation
     for entry in new_decisions:
         for req in ("id", "question", "rationale"):
             if req not in entry:
                 raise SchemaError(f"register_decision entry missing {req!r}")
         _require_slug(entry["id"], "id")
-        if entry["id"] in existing:
+        if entry["id"] in seen_ids:
             raise SchemaError(
-                f"Cannot register {entry['id']!r}: already in goal.toml"
+                f"Cannot register {entry['id']!r}: duplicate id "
+                "(already in goal.toml or earlier in this batch)"
             )
-        # Build a TOML [[decision]] block; quote-escape question by replacing " with \"
+        seen_ids.add(entry["id"])
+    # All validated; now bump version and build blocks
+    new_text, new_version = _bump_goal_version(text)
+    appended_blocks: list[str] = []
+    for entry in new_decisions:
         question_escaped = entry["question"].replace('\\', '\\\\').replace('"', '\\"')
         rationale_escaped = entry["rationale"].replace('\n', ' ')
         block = (

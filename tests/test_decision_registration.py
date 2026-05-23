@@ -79,6 +79,35 @@ class RegisterDecisionTest(unittest.TestCase):
         ])
         self.assertEqual(new_version, "g-10")
 
+    def test_register_within_batch_duplicate_id_raises(self):
+        with self.assertRaises(cg.SchemaError) as cm:
+            cg.register_decision(self.goal_path, [
+                {"id": "new-policy", "question": "?", "rationale": "x"},
+                {"id": "new-policy", "question": "?", "rationale": "y"},
+            ])
+        self.assertIn("new-policy", str(cm.exception))
+        # File must NOT have been modified
+        loaded, v = cg.load_decisions_from_goal_toml(self.goal_path)
+        self.assertEqual(v, "g-01")
+        self.assertNotIn("new-policy", loaded)
+
+    def test_register_empty_list_raises(self):
+        with self.assertRaises(cg.SchemaError) as cm:
+            cg.register_decision(self.goal_path, [])
+        self.assertIn("empty", str(cm.exception).lower())
+        # File unchanged
+        _, v = cg.load_decisions_from_goal_toml(self.goal_path)
+        self.assertEqual(v, "g-01")
+
+    def test_register_duplicate_id_does_not_modify_file(self):
+        # Atomicity: failed call leaves file unchanged
+        original = self.goal_path.read_text()
+        with self.assertRaises(cg.SchemaError):
+            cg.register_decision(self.goal_path, [
+                {"id": "retry-policy", "question": "?", "rationale": "x"},
+            ])
+        self.assertEqual(self.goal_path.read_text(), original)
+
 
 if __name__ == "__main__":
     unittest.main()
