@@ -519,3 +519,84 @@ def rewrite_position_to_canonical(
     if entry is None:
         return slug
     return entry["aliases"].get(slug, slug)
+
+
+# ----- Decision registry (goal.toml <-> derived/decisions.json) ---------------
+
+import json as _json   # late import so module header stays stdlib-only-spirit clean
+import tomllib as _tomllib
+from pathlib import Path as _Path
+
+
+def load_decisions_from_goal_toml(path: _Path) -> tuple[dict[str, Decision], str]:
+    """Read goal.toml and return ({decision_id: Decision}, goal_version).
+
+    Raises SchemaError if goal_version missing or decisions malformed.
+    """
+    with path.open("rb") as f:
+        data = _tomllib.load(f)
+    goal = data.get("goal", {})
+    if "goal_version" not in goal:
+        raise SchemaError(f"{path}: [goal] table missing goal_version")
+    goal_version = goal["goal_version"]
+    decisions: dict[str, Decision] = {}
+    for entry in data.get("decision", []):
+        dec = Decision.from_dict(entry)
+        if dec.id in decisions:
+            raise SchemaError(f"{path}: duplicate decision id {dec.id!r}")
+        decisions[dec.id] = dec
+    return decisions, goal_version
+
+
+def dump_decisions_to_json(
+    decisions: dict[str, Decision],
+    goal_version: str,
+    path: _Path,
+) -> None:
+    """Write decisions + goal_version to a JSON file (sorted keys for stability)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "goal_version": goal_version,
+        "decisions": {
+            decision_id: dec.to_dict()
+            for decision_id, dec in sorted(decisions.items())
+        },
+    }
+    with path.open("w") as f:
+        _json.dump(payload, f, indent=2, sort_keys=True)
+
+
+def detect_goal_toml_changes(
+    goal_toml_path: _Path,
+    decisions_json_path: _Path,
+) -> str:
+    """Compare goal.toml against the cached derived/decisions.json.
+
+    Returns one of:
+      - "unchanged":      goal_version matches AND decision content matches
+      - "versioned-change": goal_version differs (run registry-sync)
+
+    Raises SchemaError with "goal_version" + "bump" wording when goal.toml
+    content differs but goal_version is unchanged (silent edit; human must
+    bump version).
+    """
+    fresh, fresh_version = load_decisions_from_goal_toml(goal_toml_path)
+    if not decisions_json_path.exists():
+        return "versioned-change"
+    with decisions_json_path.open() as f:
+        cached = _json.load(f)
+    cached_version = cached.get("goal_version")
+    cached_decisions = {
+        d_id: Decision.from_dict(d)
+        for d_id, d in cached.get("decisions", {}).items()
+    }
+    if fresh_version != cached_version:
+        return "versioned-change"
+    # Same version; content must match exactly
+    if {d_id: dec.to_dict() for d_id, dec in fresh.items()} != \
+       {d_id: dec.to_dict() for d_id, dec in cached_decisions.items()}:
+        raise SchemaError(
+            f"{goal_toml_path}: content changed but goal_version is unchanged "
+            f"({cached_version!r}); bump goal_version before resuming"
+        )
+    return "unchanged"
