@@ -54,6 +54,32 @@ class ClaimRoundtripTest(unittest.TestCase):
         self.assertEqual(claim.proposed_decision["id"], "circuit-breaker-policy")
         self.assertEqual(claim.to_dict(), d)
 
+    def test_claim_proposed_decision_is_isolated_from_caller_mutation(self):
+        """Mutating the caller's dict after from_dict must not affect the Claim."""
+        proposed = {
+            "id": "circuit-breaker-policy",
+            "question": "When does the breaker reset?",
+            "rationale": "Original rationale.",
+        }
+        d = {
+            "id": "cl-000005",
+            "section_id": "circuit-breaker",
+            "decision_id": "circuit-breaker-policy",
+            "position": "half-open-probing",
+            "claim_type": "decision",
+            "evidence_ids": [],
+            "assertion": "x",
+            "proposed_decision": proposed,
+        }
+        claim = cg.Claim.from_dict(d)
+        # Mutate the source after construction
+        proposed["rationale"] = "MUTATED"
+        d["proposed_decision"]["question"] = "MUTATED"
+        # Claim must hold the original values
+        self.assertEqual(claim.proposed_decision["rationale"], "Original rationale.")
+        self.assertEqual(claim.proposed_decision["question"],
+                         "When does the breaker reset?")
+
     def test_claim_unresolved_type(self):
         d = {
             "id": "cl-000004",

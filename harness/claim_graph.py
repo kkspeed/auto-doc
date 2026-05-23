@@ -135,7 +135,8 @@ class Claim:
             assertion=d["assertion"],
             position=d.get("position"),
             out_of_scope_rationale=d.get("out_of_scope_rationale"),
-            proposed_decision=d.get("proposed_decision"),
+            proposed_decision=(dict(d["proposed_decision"])
+                               if d.get("proposed_decision") is not None else None),
         )
         # Conditional field requirements
         if claim.claim_type == "out_of_scope":
