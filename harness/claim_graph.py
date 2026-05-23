@@ -760,3 +760,76 @@ def apply_canonicalization(
                 "to": to_slug,
             })
     return rewrites
+
+
+# ----- Detectors --------------------------------------------------------------
+
+
+def _walk_claims(variants_nodes_root: _Path) -> dict[str, dict[str, list[dict]]]:
+    """Return {decision_id: {variant_name: [claim_dict, ...]}}.
+
+    Reads every variants/nodes/v-*/claims/cl-*.json. Ignores malformed files
+    (logged-only behavior; orchestrator-level validation catches schema errors
+    earlier).
+    """
+    out: dict[str, dict[str, list[dict]]] = {}
+    if not variants_nodes_root.exists():
+        return out
+    for variant_dir in sorted(variants_nodes_root.iterdir()):
+        if not variant_dir.is_dir() or not variant_dir.name.startswith("v-"):
+            continue
+        claims_dir = variant_dir / "claims"
+        if not claims_dir.exists():
+            continue
+        for cl_file in sorted(claims_dir.glob("cl-*.json")):
+            try:
+                with cl_file.open() as f:
+                    data = _json.load(f)
+            except (_json.JSONDecodeError, OSError):
+                continue
+            decision_id = data.get("decision_id")
+            if not decision_id:
+                continue
+            out.setdefault(decision_id, {}).setdefault(variant_dir.name, []).append(data)
+    return out
+
+
+def detect_position_collisions(variants_nodes_root: _Path) -> list[dict]:
+    """Find decisions where multiple variants chose different position slugs.
+
+    For each decision_id with positions from >=2 variants, if the set of
+    positions has size >= 2, produce a collision record. Out_of_scope and
+    unresolved claims have no position; they do not contribute.
+
+    Returns a list of {"decision_id": ..., "per_variant": [{...}], "confirmed": False}.
+    """
+    grouped = _walk_claims(variants_nodes_root)
+    collisions: list[dict] = []
+    for decision_id, per_variant in sorted(grouped.items()):
+        # For each variant, pick the LATEST claim with a position (highest id).
+        per_variant_latest: dict[str, dict] = {}
+        for variant_name, claim_list in per_variant.items():
+            with_position = [c for c in claim_list if c.get("position")]
+            if not with_position:
+                continue
+            latest = max(with_position, key=lambda c: c["id"])
+            per_variant_latest[variant_name] = latest
+        if len(per_variant_latest) < 2:
+            continue
+        distinct_positions = {c["position"] for c in per_variant_latest.values()}
+        if len(distinct_positions) < 2:
+            continue
+        collisions.append({
+            "decision_id": decision_id,
+            "per_variant": sorted([
+                {
+                    "variant": variant_name,
+                    "claim_id": claim["id"],
+                    "position": claim["position"],
+                    "evidence_ids": list(claim.get("evidence_ids", [])),
+                }
+                for variant_name, claim in per_variant_latest.items()
+            ], key=lambda x: x["variant"]),
+            "confirmed": False,
+        })
+    return collisions
