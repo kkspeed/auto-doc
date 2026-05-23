@@ -1002,3 +1002,63 @@ def retag_sections_for_retired_decisions(
                 "new_tags": new_tags,
             })
     return retagged
+
+
+# ----- Reviewer decision_proposals gating (Flow A step 5) ---------------------
+
+
+def apply_reviewer_decision_proposals(
+    proposed_decisions: list[dict],
+    verdicts: list[DecisionProposalVerdict],
+) -> dict:
+    """Match designer-proposed new decisions against reviewer verdicts.
+
+    Args:
+        proposed_decisions: each {"id": ..., "question": ..., "rationale": ...}
+            extracted from cl-*.json `proposed_decision` payloads.
+        verdicts: one DecisionProposalVerdict per proposed_decisions entry.
+
+    Returns:
+        {
+          "status": "all-approved" | "any-rejected",
+          "approved": [proposed_decision_dict, ...],
+          "rejected": [{"proposed_id": ..., "rationale": ...}, ...],
+          "round_fail_reason": "proposal-rejected" | None,
+        }
+
+    Raises SchemaError if verdicts count != proposals count or if a verdict
+    references an unknown proposed_id.
+    """
+    proposed_ids = {p["id"] for p in proposed_decisions}
+    if len(verdicts) != len(proposed_decisions):
+        raise SchemaError(
+            f"missing verdict: {len(proposed_decisions)} proposals but "
+            f"{len(verdicts)} verdicts"
+        )
+    for v in verdicts:
+        if v.proposed_id not in proposed_ids:
+            raise SchemaError(
+                f"verdict references unknown proposed_id {v.proposed_id!r}"
+            )
+    verdicts_by_id = {v.proposed_id: v for v in verdicts}
+    approved: list[dict] = []
+    rejected: list[dict] = []
+    for p in proposed_decisions:
+        v = verdicts_by_id[p["id"]]
+        if v.verdict == "approve":
+            approved.append(p)
+        else:
+            rejected.append({"proposed_id": p["id"], "rationale": v.rationale})
+    if rejected:
+        return {
+            "status": "any-rejected",
+            "approved": approved,
+            "rejected": rejected,
+            "round_fail_reason": "proposal-rejected",
+        }
+    return {
+        "status": "all-approved",
+        "approved": approved,
+        "rejected": [],
+        "round_fail_reason": None,
+    }
