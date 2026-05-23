@@ -1062,3 +1062,93 @@ def apply_reviewer_decision_proposals(
         "rejected": [],
         "round_fail_reason": None,
     }
+
+
+# ----- morning_brief.md render helpers ----------------------------------------
+
+
+def render_position_collisions_table(collisions: list[dict]) -> str:
+    """Render the Position collisions section of morning_brief.md."""
+    if not collisions:
+        return "## Position collisions\n\nNo position collisions this run.\n"
+    lines = ["## Position collisions", ""]
+    lines.append("| Decision | Variants × Positions | Evidence cited per variant |")
+    lines.append("|---|---|---|")
+    for c in collisions:
+        variants_positions = "; ".join(
+            f"{v['variant']}={v['position']} (cl={v['claim_id']})"
+            for v in c["per_variant"]
+        )
+        evidence = "; ".join(
+            f"{v['variant']}: {','.join(v['evidence_ids']) or '(none)'}"
+            for v in c["per_variant"]
+        )
+        lines.append(f"| {c['decision_id']} | {variants_positions} | {evidence} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_decisional_asymmetry_table(entries: list[dict]) -> str:
+    """Render the Decisional asymmetry section of morning_brief.md."""
+    if not entries:
+        return "## Decisional asymmetry\n\nNo decisional asymmetry this run.\n"
+    lines = ["## Decisional asymmetry", ""]
+    lines.append("| Decision | Variants × Status (position or rationale) |")
+    lines.append("|---|---|")
+    for e in entries:
+        cells = []
+        for v in e["per_variant"]:
+            if v["status"] == "decided":
+                cells.append(f"{v['variant']}=decided ({v['position']})")
+            else:
+                cells.append(f"{v['variant']}=out_of_scope ({v['out_of_scope_rationale']})")
+        lines.append(f"| {e['decision_id']} | {'; '.join(cells)} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_pending_registry_changes(
+    cuts_proposed: list[dict],
+    canonicalizations_pending: list[dict],
+    decision_id_canonicalizations: list[dict],
+) -> str:
+    """Render the Pending registry changes section of morning_brief.md.
+
+    Returns a string covering three sub-sections:
+      - Cuts proposed (Flow B)
+      - Position canonicalizations (medium/low) (Flow C medium/low)
+      - Decision_id canonicalizations (Flow D)
+    """
+    if not (cuts_proposed or canonicalizations_pending or
+            decision_id_canonicalizations):
+        return ("## Pending registry changes\n\n"
+                "No pending registry changes; human ritual is empty.\n")
+    out = ["## Pending registry changes", ""]
+    if cuts_proposed:
+        out.extend(["### Cuts proposed", ""])
+        out.append("| Decision | Rationale |")
+        out.append("|---|---|")
+        for c in cuts_proposed:
+            out.append(f"| {c['target_decision_id']} | {c['rationale']} |")
+        out.append("")
+    if canonicalizations_pending:
+        out.extend(["### Position canonicalizations (medium/low)", ""])
+        out.append("| Scope (decision) | From | To | Confidence | Rationale |")
+        out.append("|---|---|---|---|---|")
+        for c in canonicalizations_pending:
+            out.append(
+                f"| {c['scope']} | {c['from']} | {c['to']} | "
+                f"{c['confidence']} | {c['rationale']} |"
+            )
+        out.append("")
+    if decision_id_canonicalizations:
+        out.extend(["### Decision_id canonicalizations", ""])
+        out.append("| From | To | Confidence | Rationale |")
+        out.append("|---|---|---|---|")
+        for c in decision_id_canonicalizations:
+            out.append(
+                f"| {c['from']} | {c['to']} | "
+                f"{c['confidence']} | {c['rationale']} |"
+            )
+        out.append("")
+    return "\n".join(out)
