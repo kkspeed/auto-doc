@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Harness project layout (per parent spec §1)
+CONTEXT.md
+derived/
+rounds/*/scratch/
+*.tmp
+repo/
+sources/*/cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
