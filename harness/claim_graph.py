@@ -431,3 +431,91 @@ class DecisionProposalVerdict:
             "verdict": self.verdict,
             "rationale": self.rationale,
         }
+
+
+# ----- Canonical slug registry mechanics --------------------------------------
+
+
+def add_canonical_position(
+    registry: CanonicalSlugRegistry,
+    decision_id: str,
+    slug: str,
+) -> None:
+    """Append a slug to the canonical list for a decision.
+
+    Idempotent (adding a slug that's already canonical is a no-op). The slug
+    must not currently be an alias key for this decision — append-only aliases
+    means a slug that has been aliased cannot return to canonical.
+    """
+    _require_slug(decision_id, "decision_id")
+    _require_slug(slug, "slug")
+    registry.ensure_decision(decision_id)
+    entry = registry.data[decision_id]
+    if slug in entry["aliases"]:
+        raise RegistryInvariantError(
+            f"Cannot add canonical slug {slug!r} under decision {decision_id!r}: "
+            f"it is already an alias of {entry['aliases'][slug]!r}. "
+            "Aliases are append-only; a slug never returns to canonical."
+        )
+    if slug not in entry["canonical"]:
+        entry["canonical"].append(slug)
+
+
+def register_alias(
+    registry: CanonicalSlugRegistry,
+    decision_id: str,
+    from_slug: str,
+    to_slug: str,
+) -> None:
+    """Register from_slug as an alias of to_slug for this decision.
+
+    Invariants:
+      - to_slug MUST currently be in canonical for decision_id (alias target
+        must be canonical). Novel to_slug → RegistryInvariantError.
+      - from_slug MUST currently be in canonical (nothing to alias otherwise).
+      - from_slug MUST NOT already be an alias key (append-only aliases).
+
+    Effect: removes from_slug from canonical, adds aliases[from_slug] = to_slug.
+    """
+    _require_slug(decision_id, "decision_id")
+    _require_slug(from_slug, "from_slug")
+    _require_slug(to_slug, "to_slug")
+    if decision_id not in registry.data:
+        raise RegistryInvariantError(
+            f"Decision {decision_id!r} not in registry; cannot register alias"
+        )
+    entry = registry.data[decision_id]
+    if to_slug not in entry["canonical"]:
+        raise RegistryInvariantError(
+            f"Alias target {to_slug!r} is not canonical for decision {decision_id!r}; "
+            "canonicalization must target an existing canonical slug"
+        )
+    if from_slug in entry["aliases"]:
+        raise RegistryInvariantError(
+            f"Slug {from_slug!r} is already an alias of "
+            f"{entry['aliases'][from_slug]!r}; aliases are append-only"
+        )
+    if from_slug not in entry["canonical"]:
+        raise RegistryInvariantError(
+            f"Slug {from_slug!r} is not canonical for decision {decision_id!r}; "
+            "nothing to alias"
+        )
+    entry["canonical"].remove(from_slug)
+    entry["aliases"][from_slug] = to_slug
+
+
+def rewrite_position_to_canonical(
+    registry: CanonicalSlugRegistry,
+    decision_id: str,
+    slug: str,
+) -> str:
+    """Return the canonical form of slug under decision_id.
+
+    If slug is in aliases, returns aliases[slug]. Otherwise returns slug
+    unchanged (canonical slugs are pass-through; unknown slugs are pass-through
+    so callers can detect "new canonical candidate" via list comparison).
+    """
+    entry = registry.data.get(decision_id)
+    if entry is None:
+        return slug
+    return entry["aliases"].get(slug, slug)
