@@ -600,3 +600,63 @@ def detect_goal_toml_changes(
             f"({cached_version!r}); bump goal_version before resuming"
         )
     return "unchanged"
+
+
+# ----- Decision registration (Flow A) -----------------------------------------
+
+
+_GOAL_VERSION_RE = re.compile(r'^(\s*goal_version\s*=\s*")g-(\d+)("\s*)$',
+                              re.MULTILINE)
+
+
+def _bump_goal_version(text: str) -> tuple[str, str]:
+    """Increment the goal_version in goal.toml text. Returns (new_text, new_version)."""
+    m = _GOAL_VERSION_RE.search(text)
+    if m is None:
+        raise SchemaError("goal.toml has no parseable goal_version line")
+    current_num = int(m.group(2))
+    new_num = current_num + 1
+    new_version = f"g-{new_num:02d}"
+    new_text = _GOAL_VERSION_RE.sub(rf'\1{new_version}\3', text, count=1)
+    return new_text, new_version
+
+
+def register_decision(
+    goal_toml_path: _Path,
+    new_decisions: list[dict],
+) -> str:
+    """Append new_decisions to goal.toml, bump goal_version, return new version.
+
+    Each entry in new_decisions: {"id": "...", "question": "...", "rationale": "..."}.
+    The rationale is preserved as a comment in goal.toml above the [[decision]] block.
+
+    Raises SchemaError on duplicate id, invalid slug, or unparseable goal_version.
+    """
+    text = goal_toml_path.read_text()
+    existing, _ = load_decisions_from_goal_toml(goal_toml_path)
+    new_text, new_version = _bump_goal_version(text)
+    appended_blocks: list[str] = []
+    for entry in new_decisions:
+        for req in ("id", "question", "rationale"):
+            if req not in entry:
+                raise SchemaError(f"register_decision entry missing {req!r}")
+        _require_slug(entry["id"], "id")
+        if entry["id"] in existing:
+            raise SchemaError(
+                f"Cannot register {entry['id']!r}: already in goal.toml"
+            )
+        # Build a TOML [[decision]] block; quote-escape question by replacing " with \"
+        question_escaped = entry["question"].replace('\\', '\\\\').replace('"', '\\"')
+        rationale_escaped = entry["rationale"].replace('\n', ' ')
+        block = (
+            f'\n# Rationale: {rationale_escaped}\n'
+            f'[[decision]]\n'
+            f'id = "{entry["id"]}"\n'
+            f'question = "{question_escaped}"\n'
+            f'status = "open"\n'
+            f'introduced_at = "{new_version}"\n'
+        )
+        appended_blocks.append(block)
+    new_text = new_text.rstrip() + "\n" + "".join(appended_blocks)
+    goal_toml_path.write_text(new_text)
+    return new_version
