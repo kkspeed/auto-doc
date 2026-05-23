@@ -1,0 +1,29 @@
+[goal]
+title = "Example: API resilience design"
+description = "An example goal.toml shipped with `harness init`. Edit before running."
+goal_version = "g-01"
+
+# Decisions the doc must address. The orchestrator validates designer claims
+# against this list. Designer may propose new decisions via `proposed_decision`
+# on a cl-*.json; reviewer gates approval.
+#
+# Slug rules: kebab-case ASCII, regex ^[a-z][a-z0-9-]*[a-z0-9]$.
+# Status values: open | proposed | retired.
+
+[[decision]]
+id = "retry-policy"
+question = "How should transient failures be retried?"
+status = "open"
+introduced_at = "g-01"
+
+[[decision]]
+id = "circuit-breaker-policy"
+question = "When does the circuit breaker open, and how does it reset?"
+status = "open"
+introduced_at = "g-01"
+
+[[decision]]
+id = "rate-limit-policy"
+question = "What rate-limit window/burst should the API enforce, and how?"
+status = "open"
+introduced_at = "g-01"
