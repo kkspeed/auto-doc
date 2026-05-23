@@ -911,3 +911,94 @@ def detect_stale_proposals(
                 "introduced_round": intro,
             })
     return stale
+
+
+# ----- Section retag walker ---------------------------------------------------
+
+
+# Matches TOML frontmatter `tags = ["decided", ...]` and similar arrays.
+_TAGS_LINE_RE = re.compile(r'^(\s*tags\s*=\s*)(\[[^\]]*\])(\s*)$', re.MULTILINE)
+
+
+def _section_tags(frontmatter_text: str) -> list[str]:
+    """Extract the tags array from a section's TOML frontmatter."""
+    m = _TAGS_LINE_RE.search(frontmatter_text)
+    if m is None:
+        return []
+    inner = m.group(2)[1:-1]   # strip [ ]
+    tags: list[str] = []
+    for piece in inner.split(","):
+        piece = piece.strip().strip('"').strip("'").strip()
+        if piece:
+            tags.append(piece)
+    return tags
+
+
+def _section_decision_id(frontmatter_text: str) -> str | None:
+    """Extract section_id from a TOML frontmatter block. For v0 we treat
+    section_id as equivalent to decision_id when retagging."""
+    m = re.search(r'^\s*section_id\s*=\s*"([^"]+)"\s*$',
+                  frontmatter_text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _set_section_tags(frontmatter_text: str, new_tags: list[str]) -> str:
+    """Rewrite the tags = [...] line to contain only new_tags."""
+    replacement = "[" + ", ".join(f'"{t}"' for t in new_tags) + "]"
+    new_text, n = _TAGS_LINE_RE.subn(rf'\1{replacement}\3', frontmatter_text,
+                                     count=1)
+    if n == 0:
+        # No existing tags line; insert one before the closing +++
+        new_text = frontmatter_text.replace(
+            "+++\n",
+            f"tags = {replacement}\n+++\n",
+            1,
+        )
+    return new_text
+
+
+def retag_sections_for_retired_decisions(
+    variants_nodes_root: _Path,
+    retired_decision_ids: set[str],
+) -> list[dict]:
+    """Walk variants/*/doc/*.md, find sections whose section_id is in
+    retired_decision_ids AND whose tags include 'decided', flip to 'unresolved'.
+
+    Returns a list of {"variant": ..., "section_id": ..., "path": ...,
+    "prior_tags": [...], "new_tags": [...]} for each section retagged.
+    """
+    retagged: list[dict] = []
+    if not variants_nodes_root.exists():
+        return retagged
+    for variant_dir in sorted(variants_nodes_root.iterdir()):
+        if not variant_dir.is_dir() or not variant_dir.name.startswith("v-"):
+            continue
+        doc_dir = variant_dir / "doc"
+        if not doc_dir.exists():
+            continue
+        for md in sorted(doc_dir.glob("*.md")):
+            text = md.read_text()
+            if not text.startswith("+++"):
+                continue
+            end = text.find("+++", 3)
+            if end == -1:
+                continue
+            frontmatter = text[3:end]
+            body = text[end:]
+            section_id = _section_decision_id(frontmatter)
+            if section_id is None or section_id not in retired_decision_ids:
+                continue
+            tags = _section_tags(frontmatter)
+            if "decided" not in tags:
+                continue
+            new_tags = ["unresolved" if t == "decided" else t for t in tags]
+            new_frontmatter = _set_section_tags(frontmatter, new_tags)
+            md.write_text("+++" + new_frontmatter + body)
+            retagged.append({
+                "variant": variant_dir.name,
+                "section_id": section_id,
+                "path": str(md.relative_to(variants_nodes_root.parent.parent)),
+                "prior_tags": tags,
+                "new_tags": new_tags,
+            })
+    return retagged
