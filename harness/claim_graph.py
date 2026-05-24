@@ -624,11 +624,18 @@ def _bump_goal_version(text: str) -> tuple[str, str]:
 def register_decision(
     goal_toml_path: _Path,
     new_decisions: list[dict],
+    decisions_json_path: _Path | None = None,
 ) -> str:
     """Append new_decisions to goal.toml, bump goal_version, return new version.
 
     Each entry in new_decisions: {"id": "...", "question": "...", "rationale": "..."}.
     The rationale is preserved as a comment in goal.toml above the [[decision]] block.
+
+    When `decisions_json_path` is provided, regenerates the derived decisions
+    JSON file atomically after writing goal.toml: reloads (decisions, version)
+    from the freshly-written goal.toml and dumps them via dump_decisions_to_json.
+    Reloading rather than building the in-memory dict avoids drift between the
+    TOML text just written and the dataclass shapes constructed in-process.
 
     Raises SchemaError on: empty new_decisions list, duplicate id (existing or
     within batch), missing required field, invalid slug, or unparseable goal_version.
@@ -667,6 +674,9 @@ def register_decision(
         appended_blocks.append(block)
     new_text = new_text.rstrip() + "\n" + "".join(appended_blocks)
     goal_toml_path.write_text(new_text)
+    if decisions_json_path is not None:
+        fresh_decisions, fresh_version = load_decisions_from_goal_toml(goal_toml_path)
+        dump_decisions_to_json(fresh_decisions, fresh_version, decisions_json_path)
     return new_version
 
 
