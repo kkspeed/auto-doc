@@ -46,6 +46,7 @@ Public API consumed by the (future) orchestrator in harness/orchestrator.py:
     - render_position_collisions_table
     - render_decisional_asymmetry_table
     - render_pending_registry_changes
+    - render_stale_proposals_table
 """
 from __future__ import annotations
 
@@ -1162,3 +1163,25 @@ def render_pending_registry_changes(
             )
         out.append("")
     return "\n".join(out)
+
+
+def render_stale_proposals_table(stale: list[dict]) -> str:
+    """Render the Stale proposals section of morning_brief.md.
+
+    Input shape from detect_stale_proposals: each entry is
+    {"decision_id", "question", "rounds_since_proposal", "introduced_round"}.
+    Rows are sorted by decision_id.
+    Returns the friendly empty-state line when stale is empty.
+    """
+    if not stale:
+        return "## Stale proposals\n\nNo stale proposals this run.\n"
+    lines = ["## Stale proposals", ""]
+    lines.append("| Decision | Question | Rounds since proposal | Introduced round |")
+    lines.append("|---|---|---|---|")
+    for s in sorted(stale, key=lambda e: e["decision_id"]):
+        lines.append(
+            f"| {s['decision_id']} | {s['question']} | "
+            f"{s['rounds_since_proposal']} | {s['introduced_round']} |"
+        )
+    lines.append("")
+    return "\n".join(lines)

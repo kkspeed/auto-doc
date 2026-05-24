@@ -87,5 +87,37 @@ class RenderPendingRegistryChangesTest(unittest.TestCase):
         self.assertIn("medium", out)
 
 
+class RenderStaleProposalsTableTest(unittest.TestCase):
+    def test_empty_renders_no_stale_proposals_line(self):
+        out = cg.render_stale_proposals_table([])
+        self.assertIn("No stale proposals", out)
+        self.assertTrue(out.startswith("## Stale proposals"))
+
+    def test_single_stale_renders_row_with_rounds_since_proposal(self):
+        stale = [{
+            "decision_id": "circuit-breaker-policy",
+            "question": "When does the breaker reset?",
+            "rounds_since_proposal": 12,
+            "introduced_round": 8,
+        }]
+        out = cg.render_stale_proposals_table(stale)
+        self.assertIn("## Stale proposals", out)
+        self.assertIn("circuit-breaker-policy", out)
+        self.assertIn("When does the breaker reset?", out)
+        self.assertIn("12", out)
+        self.assertIn("8", out)
+
+    def test_multiple_stale_render_ordered_by_decision_id(self):
+        stale = [
+            {"decision_id": "z-policy", "question": "?",
+             "rounds_since_proposal": 6, "introduced_round": 1},
+            {"decision_id": "a-policy", "question": "?",
+             "rounds_since_proposal": 9, "introduced_round": 2},
+        ]
+        out = cg.render_stale_proposals_table(stale)
+        # a-policy must appear before z-policy in the rendered output
+        self.assertLess(out.index("a-policy"), out.index("z-policy"))
+
+
 if __name__ == "__main__":
     unittest.main()
