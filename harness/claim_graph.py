@@ -24,6 +24,7 @@ Public API consumed by the (future) orchestrator in harness/orchestrator.py:
     - register_alias
     - rewrite_position_to_canonical
     - apply_canonicalization
+    - apply_decision_id_canonicalization
 
   Decision registry:
     - load_decisions_from_goal_toml
@@ -1234,3 +1235,201 @@ def render_canonicalizations_applied(
             )
         out.append("")
     return "\n".join(out)
+
+
+# ----- Flow D: decision_id canonicalization apply -----------------------------
+
+
+_SECTION_ID_LINE_RE = re.compile(
+    r'^(\s*section_id\s*=\s*")([^"]+)("\s*)$', re.MULTILINE,
+)
+
+
+def _set_section_id(frontmatter_text: str, new_id: str) -> str:
+    """Rewrite the first section_id = "..." line in a frontmatter block."""
+    return _SECTION_ID_LINE_RE.sub(rf'\1{new_id}\3', frontmatter_text, count=1)
+
+
+def apply_decision_id_canonicalization(
+    variants_nodes_root: _Path,
+    registry: CanonicalSlugRegistry,
+    decisions: dict[str, Decision],
+    from_id: str,
+    to_id: str,
+) -> dict:
+    """Cascade a decision_id rename across the whole ledger (Flow D apply).
+
+    The caller has observed the human's goal.toml edit + goal_version bump,
+    reloaded `decisions` from the new goal.toml, and resolved (from_id, to_id)
+    from a queued Flow D canonicalization proposal in pending_goal_changes.md.
+
+    Execution order (rails-first):
+      1. Pre-flight rails (raise SchemaError; no filesystem mutation):
+         - from_id != to_id
+         - both slugs valid
+         - to_id in decisions (human's edit completed)
+         - from_id not in decisions (human removed the old entry)
+      2. Walk variants/nodes/v-*/{claims,attacks}/*.json and v-*/doc/*.md;
+         rewrite every field where the old slug appears.
+      3. Registry move: registry.data[from_id] → registry.data[to_id].
+         Raises RegistryInvariantError if to_id entry already non-empty
+         (cannot merge two non-empty registry entries).
+
+    Idempotent no-op: if from_id appears nowhere, returns the report with empty
+    lists and registry_moved=False. Does not raise.
+
+    Returns:
+        {
+          "claims_rewritten":   [{"path", "claim_id", "field", "from", "to"}, ...],
+          "attacks_rewritten":  [{"path", "attack_id", "field", "from", "to"}, ...],
+          "sections_rewritten": [{"path", "section_id", "from", "to"}, ...],
+          "registry_moved":     bool,
+        }
+    """
+    # ----- Rails -----
+    if from_id == to_id:
+        raise SchemaError(
+            f"apply_decision_id_canonicalization: from_id == to_id ({from_id!r}); "
+            "nothing to do — caller bug"
+        )
+    _require_slug(from_id, "from_id")
+    _require_slug(to_id, "to_id")
+    if to_id not in decisions:
+        raise SchemaError(
+            f"apply_decision_id_canonicalization: to_id {to_id!r} not registered "
+            "in decisions; human must edit goal.toml + bump goal_version first"
+        )
+    if from_id in decisions:
+        raise SchemaError(
+            f"apply_decision_id_canonicalization: from_id {from_id!r} still "
+            "registered in decisions; human must remove the old [[decision]] "
+            "block before this function runs"
+        )
+
+    report: dict = {
+        "claims_rewritten": [],
+        "attacks_rewritten": [],
+        "sections_rewritten": [],
+        "registry_moved": False,
+    }
+
+    # ----- Walk: cl-*.json -----
+    if variants_nodes_root.exists():
+        for variant_dir in sorted(variants_nodes_root.iterdir()):
+            if not variant_dir.is_dir() or not variant_dir.name.startswith("v-"):
+                continue
+            claims_dir = variant_dir / "claims"
+            if claims_dir.exists():
+                for cl_file in sorted(claims_dir.glob("cl-*.json")):
+                    with cl_file.open() as f:
+                        data = _json.load(f)
+                    changed = False
+                    rel_path = str(cl_file.relative_to(
+                        variants_nodes_root.parent.parent
+                    ))
+                    if data.get("decision_id") == from_id:
+                        data["decision_id"] = to_id
+                        report["claims_rewritten"].append({
+                            "path": rel_path, "claim_id": data.get("id"),
+                            "field": "decision_id", "from": from_id, "to": to_id,
+                        })
+                        changed = True
+                    if data.get("section_id") == from_id:
+                        data["section_id"] = to_id
+                        report["claims_rewritten"].append({
+                            "path": rel_path, "claim_id": data.get("id"),
+                            "field": "section_id", "from": from_id, "to": to_id,
+                        })
+                        changed = True
+                    proposed = data.get("proposed_decision")
+                    if isinstance(proposed, dict) and proposed.get("id") == from_id:
+                        proposed["id"] = to_id
+                        report["claims_rewritten"].append({
+                            "path": rel_path, "claim_id": data.get("id"),
+                            "field": "proposed_decision.id",
+                            "from": from_id, "to": to_id,
+                        })
+                        changed = True
+                    if changed:
+                        with cl_file.open("w") as f:
+                            _json.dump(data, f, indent=2, sort_keys=True)
+
+            # ----- Walk: at-*.json -----
+            attacks_dir = variant_dir / "attacks"
+            if attacks_dir.exists():
+                for at_file in sorted(attacks_dir.glob("at-*.json")):
+                    with at_file.open() as f:
+                        data = _json.load(f)
+                    changed = False
+                    rel_path = str(at_file.relative_to(
+                        variants_nodes_root.parent.parent
+                    ))
+                    # propose_decision_cut: target_decision_id
+                    if data.get("at_type") == "propose_decision_cut" and \
+                       data.get("target_decision_id") == from_id:
+                        data["target_decision_id"] = to_id
+                        report["attacks_rewritten"].append({
+                            "path": rel_path, "attack_id": data.get("id"),
+                            "field": "target_decision_id",
+                            "from": from_id, "to": to_id,
+                        })
+                        changed = True
+                    # propose_canonicalization kind=position: scope
+                    if data.get("at_type") == "propose_canonicalization" and \
+                       data.get("kind") == "position" and \
+                       data.get("scope") == from_id:
+                        data["scope"] = to_id
+                        report["attacks_rewritten"].append({
+                            "path": rel_path, "attack_id": data.get("id"),
+                            "field": "scope", "from": from_id, "to": to_id,
+                        })
+                        changed = True
+                    if changed:
+                        with at_file.open("w") as f:
+                            _json.dump(data, f, indent=2, sort_keys=True)
+
+            # ----- Walk: doc/*.md frontmatter section_id -----
+            doc_dir = variant_dir / "doc"
+            if doc_dir.exists():
+                for md in sorted(doc_dir.glob("*.md")):
+                    text = md.read_text()
+                    if not text.startswith("+++"):
+                        continue
+                    end = text.find("+++", 3)
+                    if end == -1:
+                        continue
+                    frontmatter = text[3:end]
+                    body = text[end:]
+                    section_id = _section_decision_id(frontmatter)
+                    if section_id != from_id:
+                        continue
+                    new_frontmatter = _set_section_id(frontmatter, to_id)
+                    md.write_text("+++" + new_frontmatter + body)
+                    report["sections_rewritten"].append({
+                        "path": str(md.relative_to(
+                            variants_nodes_root.parent.parent
+                        )),
+                        "section_id": to_id,
+                        "from": from_id, "to": to_id,
+                    })
+
+    # ----- Registry move (last) -----
+    # Registry move is intentionally LAST (unlike apply_canonicalization, which
+    # moves the alias registry first). Because the walk is idempotent (files
+    # already at to_id will not re-match from_id), a mid-walk crash is safely
+    # retried: from_id remains in the registry so the next call passes the rails
+    # and completes the walk.
+    if from_id in registry.data:
+        existing_to = registry.data.get(to_id)
+        if existing_to is not None:
+            if existing_to["canonical"] or existing_to["aliases"]:
+                raise RegistryInvariantError(
+                    f"Cannot move registry entry {from_id!r} → {to_id!r}: "
+                    f"{to_id!r} already has non-empty canonical/aliases "
+                    "(cannot merge two non-empty registry entries via "
+                    "decision_id canonicalization)"
+                )
+        registry.data[to_id] = registry.data.pop(from_id)
+        report["registry_moved"] = True
+
+    return report
