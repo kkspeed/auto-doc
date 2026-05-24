@@ -119,5 +119,76 @@ class RenderStaleProposalsTableTest(unittest.TestCase):
         self.assertLess(out.index("a-policy"), out.index("z-policy"))
 
 
+class RenderCanonicalizationsAppliedTest(unittest.TestCase):
+    def test_empty_both_lists_renders_no_canonicalizations_line(self):
+        out = cg.render_canonicalizations_applied([], [])
+        self.assertIn("No canonicalizations applied", out)
+        self.assertTrue(out.startswith("## Canonicalizations applied"))
+
+    def test_position_rewrites_only_renders_position_subtable(self):
+        position_rewrites = [{
+            "path": "workspace/variants/nodes/v-001/claims/cl-000001.json",
+            "claim_id": "cl-000001",
+            "decision_id": "retry-policy",
+            "from": "exponential-backoff",
+            "to": "expo-backoff",
+        }]
+        out = cg.render_canonicalizations_applied(position_rewrites, [])
+        self.assertIn("Position canonicalizations", out)
+        self.assertIn("retry-policy", out)
+        self.assertIn("exponential-backoff", out)
+        self.assertIn("expo-backoff", out)
+        self.assertIn("cl-000001", out)
+        # Decision_id sub-table absent
+        self.assertNotIn("Decision_id canonicalizations", out)
+
+    def test_decision_id_rewrites_only_renders_decision_id_subtable(self):
+        decision_id_rewrites = [{
+            "from": "auth-policy",
+            "to": "authentication-policy",
+            "kind": "claim",
+            "paths": [
+                "workspace/variants/nodes/v-001/claims/cl-000002.json",
+                "workspace/variants/nodes/v-002/claims/cl-000003.json",
+            ],
+        }]
+        out = cg.render_canonicalizations_applied([], decision_id_rewrites)
+        self.assertIn("Decision_id canonicalizations", out)
+        self.assertIn("auth-policy", out)
+        self.assertIn("authentication-policy", out)
+        self.assertIn("cl-000002", out)
+        self.assertIn("claim", out)
+        # Position sub-table absent
+        self.assertNotIn("Position canonicalizations", out)
+
+    def test_both_kinds_render_both_subtables(self):
+        position_rewrites = [{
+            "path": "workspace/variants/nodes/v-001/claims/cl-000001.json",
+            "claim_id": "cl-000001", "decision_id": "retry-policy",
+            "from": "exponential-backoff", "to": "expo-backoff",
+        }]
+        decision_id_rewrites = [{
+            "from": "auth-policy", "to": "authentication-policy",
+            "kind": "section",
+            "paths": ["workspace/variants/nodes/v-001/doc/01-auth-policy.md"],
+        }]
+        out = cg.render_canonicalizations_applied(position_rewrites,
+                                                  decision_id_rewrites)
+        self.assertIn("Position canonicalizations", out)
+        self.assertIn("Decision_id canonicalizations", out)
+        self.assertIn("retry-policy", out)
+        self.assertIn("auth-policy", out)
+        self.assertIn("section", out)
+        self.assertLess(out.index("Position canonicalizations"),
+                        out.index("Decision_id canonicalizations"))
+
+    def test_decision_id_rewrite_with_empty_paths_renders_none_cell(self):
+        out = cg.render_canonicalizations_applied([], [{
+            "from": "auth-policy", "to": "authentication-policy",
+            "kind": "attack", "paths": [],
+        }])
+        self.assertIn("(none)", out)
+
+
 if __name__ == "__main__":
     unittest.main()

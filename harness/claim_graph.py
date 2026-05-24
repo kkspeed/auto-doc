@@ -47,6 +47,7 @@ Public API consumed by the (future) orchestrator in harness/orchestrator.py:
     - render_decisional_asymmetry_table
     - render_pending_registry_changes
     - render_stale_proposals_table
+    - render_canonicalizations_applied
 """
 from __future__ import annotations
 
@@ -1185,3 +1186,51 @@ def render_stale_proposals_table(stale: list[dict]) -> str:
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def render_canonicalizations_applied(
+    position_rewrites: list[dict],
+    decision_id_rewrites: list[dict],
+) -> str:
+    """Render the Canonicalizations applied this round section of morning_brief.md.
+
+    Inputs:
+      position_rewrites — records produced by apply_canonicalization, each
+        {"path", "claim_id", "decision_id", "from", "to"}.
+      decision_id_rewrites — orchestrator-synthesized from
+        apply_decision_id_canonicalization's return value, each
+        {"from", "to", "kind", "paths"} where kind ∈ {"claim", "attack", "section"}
+        and paths is the list of touched files for that (from, to, kind) group.
+
+    Both lists are rendered in caller-supplied order; sort upstream if
+    deterministic output is required.
+
+    Returns the friendly empty-state line when both lists are empty. Otherwise
+    renders two sub-tables under a level-2 header, omitting any sub-table whose
+    list is empty.
+    """
+    if not (position_rewrites or decision_id_rewrites):
+        return ("## Canonicalizations applied this round\n\n"
+                "No canonicalizations applied this run.\n")
+    out = ["## Canonicalizations applied this round", ""]
+    if position_rewrites:
+        out.extend(["### Position canonicalizations", ""])
+        out.append("| Decision | From | To | Claim | Path |")
+        out.append("|---|---|---|---|---|")
+        for r in position_rewrites:
+            out.append(
+                f"| {r['decision_id']} | {r['from']} | {r['to']} | "
+                f"{r['claim_id']} | {r['path']} |"
+            )
+        out.append("")
+    if decision_id_rewrites:
+        out.extend(["### Decision_id canonicalizations", ""])
+        out.append("| From | To | Kind | Paths |")
+        out.append("|---|---|---|---|")
+        for r in decision_id_rewrites:
+            paths_cell = "; ".join(r["paths"]) if r["paths"] else "(none)"
+            out.append(
+                f"| {r['from']} | {r['to']} | {r['kind']} | {paths_cell} |"
+            )
+        out.append("")
+    return "\n".join(out)
