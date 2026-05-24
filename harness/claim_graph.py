@@ -635,10 +635,16 @@ def register_decision(
     The rationale is preserved as a comment in goal.toml above the [[decision]] block.
 
     When `decisions_json_path` is provided, regenerates the derived decisions
-    JSON file atomically after writing goal.toml: reloads (decisions, version)
-    from the freshly-written goal.toml and dumps them via dump_decisions_to_json.
+    JSON file after writing goal.toml: reloads (decisions, version) from the
+    freshly-written goal.toml and dumps them via dump_decisions_to_json.
     Reloading rather than building the in-memory dict avoids drift between the
     TOML text just written and the dataclass shapes constructed in-process.
+
+    Atomicity scope: a single function call regenerates both files when the path
+    is supplied — but if the decisions.json write fails (e.g., disk full), goal.toml
+    remains in its updated state. The caller is responsible for orchestrator-level
+    recovery (re-running register_decision with the same inputs is idempotent for
+    the JSON regeneration step because load_decisions_from_goal_toml is pure).
 
     Raises SchemaError on: empty new_decisions list, duplicate id (existing or
     within batch), missing required field, invalid slug, or unparseable goal_version.
@@ -1229,6 +1235,8 @@ def render_canonicalizations_applied(
         out.append("| From | To | Kind | Paths |")
         out.append("|---|---|---|---|")
         for r in decision_id_rewrites:
+            _require_enum(r["kind"], frozenset({"claim", "attack", "section"}),
+                          "decision_id_rewrites[].kind")
             paths_cell = "; ".join(r["paths"]) if r["paths"] else "(none)"
             out.append(
                 f"| {r['from']} | {r['to']} | {r['kind']} | {paths_cell} |"
@@ -1274,6 +1282,12 @@ def apply_decision_id_canonicalization(
       3. Registry move: registry.data[from_id] → registry.data[to_id].
          Raises RegistryInvariantError if to_id entry already non-empty
          (cannot merge two non-empty registry entries).
+
+    Note: the rails do NOT scan the registry for cross-decision slug collisions.
+    If `to_id` is already in use as a canonical position slug or alias key under
+    some OTHER decision's registry entry, this function will not detect that —
+    the human who edited goal.toml is responsible for choosing a `to_id` that
+    does not collide with existing position slugs across the registry.
 
     Idempotent no-op: if from_id appears nowhere, returns the report with empty
     lists and registry_moved=False. Does not raise.
