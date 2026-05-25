@@ -1,5 +1,6 @@
 """Integration tests for the commit-msg hook script."""
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -154,6 +155,184 @@ class CommitMsgFileSetTest(unittest.TestCase):
         result = _run_hook(self.ws, msg)
         self.assertEqual(result.returncode, 1)
         self.assertIn("phase-b-fail", result.stderr)
+
+
+def _commit_initial_section(workspace: Path, variant: str, section_name: str,
+                            tags: list[str], body: str = "body\n"):
+    """Stage and commit (bypassing hooks) a section file as the initial state.
+
+    Returns the file path. Uses --no-verify to skip our own hooks during
+    test setup; the test then makes a NEW change to exercise the hook.
+    """
+    doc_dir = workspace / "variants" / "nodes" / variant / "doc"
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    tag_str = ", ".join(f'"{t}"' for t in tags)
+    fp = doc_dir / f"{section_name}.md"
+    fp.write_text(f"+++\nsection_id = \"x\"\ntags = [{tag_str}]\n+++\n{body}")
+    subprocess.check_call(["git", "-C", str(workspace), "add", str(fp)])
+    subprocess.check_call(
+        ["git", "-C", str(workspace), "commit", "--no-verify", "-q",
+         "-m", "setup\n\nAction: init\n"],
+    )
+    return fp
+
+
+def _modify_section(workspace: Path, fp: Path, new_tags: list[str] | None = None,
+                    new_body: str | None = None):
+    """Modify the section file. Re-reads original and selectively updates."""
+    text = fp.read_text()
+    if new_tags is not None:
+        tag_str = ", ".join(f'"{t}"' for t in new_tags)
+        text = re.sub(r"(tags\s*=\s*)\[[^\]]*\]", rf"\1[{tag_str}]", text)
+    if new_body is not None:
+        # Replace everything after the second +++
+        end = text.find("+++", 3)
+        text = text[: end + 3] + "\n" + new_body
+    fp.write_text(text)
+
+
+def _stage(workspace: Path, *paths: str):
+    subprocess.check_call(["git", "-C", str(workspace), "add", *paths])
+
+
+class CommitMsgScopeTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_action_merge_three_sections_passes(self):
+        for i in range(1, 4):
+            _stage_file(self.ws, f"variants/nodes/v-001/doc/0{i}-s.md",
+                        "+++\nsection_id = \"x\"\ntags = []\n+++\nbody\n")
+        msg = _write_msg(
+            self.ws,
+            "subject\n\nAction: merge\nVariant: v-001\nRound: round-000001\n",
+        )
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+
+    def test_action_merge_four_sections_rejects(self):
+        for i in range(1, 5):
+            _stage_file(self.ws, f"variants/nodes/v-001/doc/0{i}-s.md",
+                        "+++\nsection_id = \"x\"\ntags = []\n+++\nbody\n")
+        msg = _write_msg(
+            self.ws,
+            "subject\n\nAction: merge\nVariant: v-001\nRound: round-000001\n",
+        )
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("4 doc sections", result.stderr)
+        self.assertIn("limit is 3", result.stderr)
+
+
+class CommitMsgImmutabilityTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_decided_section_body_change_with_goal_version_bump_passes(self):
+        fp = _commit_initial_section(self.ws, "v-001", "01-s", ["decided"])
+        # Modify the body
+        _modify_section(self.ws, fp, new_body="updated body\n")
+        # Modify goal.toml goal_version
+        goal_path = self.ws / "goal.toml"
+        text = goal_path.read_text()
+        text = text.replace('goal_version = "g-01"', 'goal_version = "g-02"')
+        goal_path.write_text(text)
+        _stage(self.ws, str(fp), str(goal_path))
+        msg = _write_msg(
+            self.ws,
+            "subject\n\nAction: merge\nVariant: v-001\nRound: round-000002\n",
+        )
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+
+    def test_decided_section_body_change_without_goal_version_bump_rejects(self):
+        fp = _commit_initial_section(self.ws, "v-001", "01-s", ["decided"])
+        _modify_section(self.ws, fp, new_body="updated body\n")
+        _stage(self.ws, str(fp))
+        msg = _write_msg(
+            self.ws,
+            "subject\n\nAction: merge\nVariant: v-001\nRound: round-000002\n",
+        )
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("immutability", result.stderr.lower())
+
+    def test_decided_section_tag_only_change_on_registry_sync_passes(self):
+        fp = _commit_initial_section(self.ws, "v-001", "01-s", ["decided"])
+        _modify_section(self.ws, fp, new_tags=["unresolved"])
+        _stage(self.ws, str(fp))
+        msg = _write_msg(self.ws, "subject\n\nAction: registry-sync\n")
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+
+    def test_decided_section_tag_only_change_on_merge_rejects(self):
+        fp = _commit_initial_section(self.ws, "v-001", "01-s", ["decided"])
+        _modify_section(self.ws, fp, new_tags=["unresolved"])
+        _stage(self.ws, str(fp))
+        msg = _write_msg(
+            self.ws,
+            "subject\n\nAction: merge\nVariant: v-001\nRound: round-000002\n",
+        )
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("registry-sync", result.stderr)
+
+    def test_non_decided_section_body_change_passes(self):
+        fp = _commit_initial_section(self.ws, "v-001", "01-s", ["unresolved"])
+        _modify_section(self.ws, fp, new_body="updated body\n")
+        _stage(self.ws, str(fp))
+        msg = _write_msg(
+            self.ws,
+            "subject\n\nAction: merge\nVariant: v-001\nRound: round-000002\n",
+        )
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+
+    def test_decided_section_body_change_with_goal_toml_staged_but_version_unchanged_rejects(self):
+        # Stage goal.toml WITHOUT bumping goal_version — only edit a comment
+        # or some other field. The hook should still reject the section body
+        # change because no goal_version bump occurred.
+        fp = _commit_initial_section(self.ws, "v-001", "01-s", ["decided"])
+        _modify_section(self.ws, fp, new_body="updated body\n")
+        goal_path = self.ws / "goal.toml"
+        text = goal_path.read_text()
+        # Modify goal.toml without bumping goal_version (e.g., add a comment)
+        text = text + "\n# trailing comment added without version bump\n"
+        goal_path.write_text(text)
+        _stage(self.ws, str(fp), str(goal_path))
+        msg = _write_msg(
+            self.ws,
+            "subject\n\nAction: merge\nVariant: v-001\nRound: round-000002\n",
+        )
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("immutability", result.stderr.lower())
+
+    def test_decided_section_deletion_rejects(self):
+        # Deleting a decided section should be rejected — it's a structural
+        # change that the orchestrator's documented flows never perform.
+        fp = _commit_initial_section(self.ws, "v-001", "01-s", ["decided"])
+        # Stage the deletion of the file
+        subprocess.check_call(
+            ["git", "-C", str(self.ws), "rm", "-q", str(fp.relative_to(self.ws))],
+        )
+        msg = _write_msg(
+            self.ws,
+            "subject\n\nAction: merge\nVariant: v-001\nRound: round-000002\n",
+        )
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot delete decided", result.stderr)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import fnmatch
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -73,6 +74,12 @@ ACTION_FILE_WHITELIST = {
         "rejections/rj-*.md",
         "variants/nodes/v-*/scorecard.json",
         "actions.jsonl",
+        # Required by the decided-section immutability escape hatch: a body
+        # change on a decided section is only authorized when goal.toml is
+        # co-staged with a goal_version bump (spec §3.6 decided-section
+        # immutability check). The spec's merge whitelist omits this; this
+        # entry is the intentional deviation.
+        "goal.toml",
     ],
     "register-decision": [
         "goal.toml",
@@ -117,6 +124,140 @@ def check_file_whitelist(action, files):
                 f"scope-violation: Action: {action} does not allow "
                 f"staged file {f!r}; allowed patterns: {whitelist}"
             )
+    return errors
+
+
+# ----- Scope + immutability ---------------------------------------------------
+
+
+def load_harness_config():
+    p = Path("harness.toml")
+    if not p.exists():
+        return {}
+    with p.open("rb") as f:
+        return tomllib.load(f)
+
+
+def check_scope(action, files):
+    if action != "merge":
+        return []
+    section_files = [f for f in files
+                     if _match_glob(f, "variants/nodes/v-*/doc/*.md")]
+    config = load_harness_config()
+    limit = config.get("run", {}).get("patch_max_sections", 3)
+    if len(section_files) > limit:
+        return [
+            f"Action: merge touches {len(section_files)} doc sections, "
+            f"limit is {limit} (from harness.toml [run].patch_max_sections); "
+            f"files: {section_files}"
+        ]
+    return []
+
+
+def _git_show_head(path):
+    try:
+        return subprocess.check_output(
+            ["git", "show", f"HEAD:{path}"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def _git_show_staged(path):
+    try:
+        return subprocess.check_output(
+            ["git", "show", f":{path}"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def _parse_goal_version(text):
+    m = re.search(r'^\s*goal_version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _extract_tags(text):
+    if not text.startswith("+++"):
+        return []
+    end = text.find("+++", 3)
+    if end == -1:
+        return []
+    fm = text[3:end]
+    m = re.search(r'^\s*tags\s*=\s*\[([^\]]*)\]', fm, re.MULTILINE)
+    if not m:
+        return []
+    return [t.strip().strip('"').strip("'")
+            for t in m.group(1).split(",") if t.strip()]
+
+
+def _bodies_equal_modulo_tags(a, b):
+    """Compare two section files ignoring differences in the tags = [...] line."""
+    tags_re = re.compile(r'^(\s*tags\s*=\s*)\[[^\]]*\](\s*)$', re.MULTILINE)
+    a_norm = tags_re.sub(r'\1[]\2', a)
+    b_norm = tags_re.sub(r'\1[]\2', b)
+    return a_norm == b_norm
+
+
+def check_immutability(action, files):
+    errors = []
+    section_files = [f for f in files
+                     if _match_glob(f, "variants/nodes/v-*/doc/*.md")]
+    if not section_files:
+        return errors
+
+    # Did this commit also bump goal_version?
+    goal_bumped = False
+    if "goal.toml" in files:
+        head_goal = _git_show_head("goal.toml")
+        staged_goal = _git_show_staged("goal.toml")
+        if head_goal and staged_goal:
+            head_v = _parse_goal_version(head_goal)
+            staged_v = _parse_goal_version(staged_goal)
+            if head_v != staged_v:
+                goal_bumped = True
+
+    for f in section_files:
+        head_content = _git_show_head(f)
+        if head_content is None:
+            continue  # new file; no prior state to violate
+        head_tags = _extract_tags(head_content)
+        staged_content = _git_show_staged(f)
+        if staged_content is None:
+            # File staged for deletion. If HEAD had it as decided, reject —
+            # deletion is a structural change to a decided section that the
+            # orchestrator's documented flows (retag walker, registry-sync)
+            # never perform. Allow deletion of non-decided sections.
+            if "decided" in head_tags:
+                errors.append(
+                    f"immutability-violation: {f}: cannot delete decided "
+                    "section; decided sections require explicit retirement "
+                    "(retag walker via Action: registry-sync)"
+                )
+            continue
+        if "decided" not in head_tags:
+            continue  # not yet decided; no immutability constraint
+        staged_tags = _extract_tags(staged_content)
+        body_unchanged_modulo_tags = _bodies_equal_modulo_tags(
+            head_content, staged_content,
+        )
+        if head_tags != staged_tags and body_unchanged_modulo_tags:
+            # Tag-only change
+            if action != "registry-sync":
+                errors.append(
+                    f"{f}: tag-only change on decided section requires "
+                    f"Action: registry-sync (got Action: {action!r}); "
+                    f"immutability-violation"
+                )
+        elif not body_unchanged_modulo_tags:
+            # Body change (with or without tag change)
+            if not goal_bumped:
+                errors.append(
+                    f"{f}: decided section modified without goal_version "
+                    f"bump; immutability-violation"
+                )
     return errors
 
 
@@ -208,6 +349,8 @@ def main():
         errors.extend(check_required_trailers(action, seen_keys))
         files = staged_files()
         errors.extend(check_file_whitelist(action, files))
+        errors.extend(check_scope(action, files))
+        errors.extend(check_immutability(action, files))
 
     if errors:
         print("commit-msg failed:", file=sys.stderr)
