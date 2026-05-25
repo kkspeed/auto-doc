@@ -7,10 +7,9 @@ test (tests/test_hook_parity.py) ensures the inlined logic stays in sync
 with harness/claim_graph.py.
 
 Checks: cl-*.json schema, at-*.json schema, cross-field validators
-(decision_id resolution, vacuous slug, alias rewriting).
-
-TODO (Task 4): citation resolution — scan staged .md files for [^ev-*] cites
-and verify each resolves to a non-superseded evidence file.
+(decision_id resolution, vacuous slug, alias rewriting), citation resolution
+(scans staged .md files for [^ev-*] cites; verifies each resolves to a
+non-superseded evidence/ev-*.md file).
 
 Action-aware checks (scope, immutability) live in the commit-msg hook because
 pre-commit cannot read the commit's Action trailer.
@@ -210,6 +209,52 @@ def is_attack_file(path_str):
             and parts[-1].startswith("at-") and parts[-1].endswith(".json"))
 
 
+def cite_resolution_check(files=None):
+    """Scan staged .md files for [^ev-NNNNNN] additions; verify each resolves.
+
+    Args:
+        files: list of staged paths. If None, calls staged_files() to get them.
+
+    Returns:
+        A list of error message strings (empty on success).
+    """
+    if files is None:
+        files = staged_files()
+    errors = []
+    md_files = [f for f in files if f.endswith(".md")]
+    cite_re = re.compile(r"\[\^ev-(\d{6})\]")
+
+    cites = set()
+    for f in md_files:
+        diff = subprocess.check_output(
+            ["git", "diff", "--cached", "-U0", "--", f]
+        ).decode()
+        for line in diff.split("\n"):
+            if line.startswith("+") and not line.startswith("+++"):
+                for m in cite_re.finditer(line):
+                    cites.add(m.group(1))
+
+    for ev_num in sorted(cites):
+        ev_path = Path("evidence") / f"ev-{ev_num}.md"
+        if not ev_path.exists():
+            errors.append(
+                f"cite [^ev-{ev_num}] does not resolve (no {ev_path})"
+            )
+            continue
+        text = ev_path.read_text()
+        # Check superseded_by in TOML frontmatter
+        if text.startswith("+++"):
+            end = text.find("+++", 3)
+            if end != -1:
+                frontmatter = text[3:end]
+                if re.search(r'^\s*superseded_by\s*=\s*"[^"]+"', frontmatter,
+                             re.MULTILINE):
+                    errors.append(
+                        f"cite [^ev-{ev_num}] refers to superseded evidence"
+                    )
+    return errors
+
+
 # ----- Main -------------------------------------------------------------------
 
 
@@ -217,8 +262,9 @@ def main():
     errors = []
     decisions = load_decisions()
     registry = load_registry()
+    files = staged_files()
 
-    for f in staged_files():
+    for f in files:
         if is_claim_file(f):
             try:
                 with open(f) as fp:
@@ -236,6 +282,8 @@ def main():
                 validate_attack_dict(data)
             except (SchemaError, json.JSONDecodeError) as e:
                 errors.append(f"{f}: {e}")
+
+    errors.extend(cite_resolution_check(files))
 
     if errors:
         print("pre-commit failed:", file=sys.stderr)

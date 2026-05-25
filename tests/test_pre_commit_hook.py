@@ -165,5 +165,86 @@ class PreCommitSchemaTest(unittest.TestCase):
         self.assertIn("at_type", result.stderr)
 
 
+def _write_evidence(workspace: Path, ev_id: str, superseded_by: str | None = None):
+    ev_dir = workspace / "evidence"
+    ev_dir.mkdir(parents=True, exist_ok=True)
+    if superseded_by is not None:
+        frontmatter = f'superseded_by = "{superseded_by}"\n'
+    else:
+        frontmatter = ""
+    text = f"+++\n{frontmatter}+++\n\nEvidence body.\n"
+    (ev_dir / f"ev-{ev_id}.md").write_text(text)
+
+
+def _write_section(workspace: Path, variant: str, section_name: str, body: str):
+    """Write a doc section file with the given body (used to introduce cites)."""
+    doc_dir = workspace / "variants" / "nodes" / variant / "doc"
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    (doc_dir / f"{section_name}.md").write_text(body)
+
+
+class PreCommitCitationTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_passes_cite_resolution_for_existing_evidence(self):
+        _write_evidence(self.ws, "000001")
+        _write_section(self.ws, "v-001", "01-retry-policy",
+                       "Some claim [^ev-000001].\n")
+        _stage_all(self.ws)
+        result = _run_hook(self.ws)
+        self.assertEqual(result.returncode, 0,
+                         f"stderr: {result.stderr}")
+
+    def test_rejects_cite_for_missing_evidence(self):
+        _write_section(self.ws, "v-001", "01-retry-policy",
+                       "Some claim [^ev-999999].\n")
+        _stage_all(self.ws)
+        result = _run_hook(self.ws)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ev-999999", result.stderr)
+        self.assertIn("does not resolve", result.stderr)
+
+    def test_rejects_cite_for_superseded_evidence(self):
+        _write_evidence(self.ws, "000001", superseded_by="ev-000002")
+        _write_evidence(self.ws, "000002")
+        _write_section(self.ws, "v-001", "01-retry-policy",
+                       "Some claim [^ev-000001].\n")
+        _stage_all(self.ws)
+        result = _run_hook(self.ws)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ev-000001", result.stderr)
+        self.assertIn("superseded", result.stderr)
+
+    def test_ignores_cite_in_removed_lines(self):
+        # Initial commit: section with a cite to a missing evidence file.
+        # Use --no-verify to skip the hook for setup.
+        _write_section(self.ws, "v-001", "01-retry-policy",
+                       "Initial body with [^ev-999999] cite.\n")
+        subprocess.check_call(
+            ["git", "-C", str(self.ws), "add", "-A"],
+        )
+        subprocess.check_call(
+            ["git", "-C", str(self.ws),
+             "commit", "--no-verify", "-q", "-m",
+             "setup\n\nAction: init\n"],
+        )
+        # Now remove the cite line (and the file, which has only that content).
+        _write_section(self.ws, "v-001", "01-retry-policy",
+                       "Body without any cites.\n")
+        _stage_all(self.ws)
+        result = _run_hook(self.ws)
+        # The removed line had [^ev-999999] (no evidence file exists), but
+        # since it's a deletion, the citation check must ignore it.
+        self.assertEqual(result.returncode, 0,
+                         f"stderr should be empty for deleted cites; got: "
+                         f"{result.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main()
