@@ -1,0 +1,42 @@
+# Harness orchestrator config. Edit and commit changes you make to the defaults.
+
+[models]
+# Per-role: which CLI tool to spawn AND which model ID.
+# Supported tools: "claude", "codex", "gemini".
+# Verifier C should differ from designer/reviewer — same-model self-verification
+# is degenerate. If you don't have codex, change verifier_c to a different
+# Claude model (e.g., sonnet) via the "claude" tool for a weaker but still
+# useful cross-check.
+
+[models.planner]
+tool  = "claude"
+model = "claude-haiku-4-5-20251001"
+
+[models.designer]
+tool  = "claude"
+model = "claude-opus-4-7-20260315"
+
+[models.reviewer]
+tool  = "claude"
+model = "claude-opus-4-7-20260315"
+
+[models.verifier_c]
+tool  = "codex"
+model = "gpt-5-20260301"
+
+
+[run]
+# Loop bounds: whichever hits first ends the run.
+max_rounds = 200                  # absolute round cap; overnight targets 100-120
+max_wall_clock_hours = 12         # second cap
+
+# Cadence + scope.
+verifier_c_every = 1              # 1 = every round; raise to reduce Codex spend
+patch_max_sections = 3            # hook rejects round-commits touching >N section files
+spawn_timeout_seconds = 300       # per CLI spawn; round fails with reason: spawn-failed
+
+
+[claim_graph]
+# Claim graph thresholds (see harness/claim_graph.py).
+stale_proposals_threshold_rounds = 5    # proposed decisions older than N rounds surface as stale
+bootstrap_registry_size_threshold = 5   # reviewer permissive on new-decision proposals when registry has fewer entries

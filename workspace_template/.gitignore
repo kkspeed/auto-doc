@@ -1,0 +1,6 @@
+CONTEXT.md
+derived/
+rounds/*/scratch/
+*.tmp
+repo/
+sources/*/cache/
