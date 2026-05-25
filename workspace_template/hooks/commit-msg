@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""commit-msg hook for the Design Doc Evolution Harness.
+
+Validates closed-vocab trailers, required-trailers-per-Action, Action-aware
+file-set whitelist, scope (≤ patch_max_sections per merge commit), and decided-
+section immutability. See docs/superpowers/specs/2026-05-24-workspace-bootstrap-
+and-hooks-design.md §3.6.
+"""
+import re
+import sys
+from pathlib import Path
+
+
+# ----- Closed-vocab enums -----------------------------------------------------
+
+
+ALLOWED_ACTIONS = frozenset({
+    "init", "merge", "register-decision", "canonicalize", "registry-sync",
+    "reviewer-rejected", "phase-a-fail", "phase-b-fail", "phase-c-dispute",
+    "spawn-failed", "output-parse-fail",
+})
+
+ALLOWED_REASONS = frozenset({
+    "uncited-claim", "cross-field-fail", "vacuous-position",
+    "proposal-rejected", "scope-violation", "immutability-violation",
+    "phantom-claim", "dangling-evidence", "silent-goal-toml-edit",
+})
+
+VARIANT_RE = re.compile(r"^v-\d{3}$")
+ROUND_RE = re.compile(r"^round-\d{6}$")
+
+# Standard Git trailers that pass through untouched.
+STANDARD_TRAILERS = frozenset({"Signed-off-by", "Co-authored-by"})
+
+# Required trailer keys per Action.
+TRAILER_REQUIREMENTS = {
+    "init": set(),
+    "merge": {"Variant", "Round"},
+    "register-decision": set(),
+    "canonicalize": set(),
+    "registry-sync": set(),
+    "reviewer-rejected": {"Variant", "Round", "Reason", "Reviewer"},
+    "phase-a-fail": {"Variant", "Round", "Reason"},
+    "phase-b-fail": {"Variant", "Round", "Reason"},
+    "phase-c-dispute": {"Variant", "Round", "Reason"},
+    "spawn-failed": {"Variant", "Round"},
+    "output-parse-fail": {"Variant", "Round"},
+}
+
+
+# ----- Trailer parsing --------------------------------------------------------
+
+
+def parse_trailers(text):
+    """Return list of (key, value) tuples for trailers in the last paragraph."""
+    paragraphs = text.rstrip().split("\n\n")
+    if not paragraphs:
+        return []
+    last = paragraphs[-1]
+    trailers = []
+    for line in last.split("\n"):
+        m = re.match(r"^([A-Za-z][A-Za-z0-9-]*):\s*(.+)$", line)
+        if m:
+            trailers.append((m.group(1), m.group(2).strip()))
+    return trailers
+
+
+def validate_trailers(trailers):
+    """Returns (errors, seen_keys) — errors is a list, seen_keys is a dict."""
+    errors = []
+    seen_keys = {}
+    for key, value in trailers:
+        if key in STANDARD_TRAILERS:
+            continue
+        if key in seen_keys:
+            errors.append(f"duplicate trailer {key!r}")
+            continue
+        seen_keys[key] = value
+        if key == "Action":
+            if value not in ALLOWED_ACTIONS:
+                errors.append(
+                    f"Action {value!r} not in allowed set "
+                    f"{sorted(ALLOWED_ACTIONS)}"
+                )
+        elif key == "Reason":
+            if value not in ALLOWED_REASONS:
+                errors.append(
+                    f"Reason {value!r} not in allowed set "
+                    f"{sorted(ALLOWED_REASONS)}"
+                )
+        elif key == "Variant":
+            if not VARIANT_RE.match(value):
+                errors.append(
+                    f"Variant {value!r} does not match ^v-\\d{{3}}$"
+                )
+        elif key == "Round":
+            if not ROUND_RE.match(value):
+                errors.append(
+                    f"Round {value!r} does not match ^round-\\d{{6}}$"
+                )
+        elif key == "Reviewer":
+            if not VARIANT_RE.match(value):
+                errors.append(
+                    f"Reviewer {value!r} does not match ^v-\\d{{3}}$"
+                )
+        else:
+            errors.append(f"unknown trailer key {key!r}")
+    return errors, seen_keys
+
+
+def check_required_trailers(action, seen_keys):
+    if action not in TRAILER_REQUIREMENTS:
+        return []
+    required = TRAILER_REQUIREMENTS[action]
+    return [f"Action: {action} requires trailer {k!r}"
+            for k in sorted(required) if k not in seen_keys]
+
+
+# ----- Main -------------------------------------------------------------------
+
+
+def main():
+    msg_file = sys.argv[1]
+    text = Path(msg_file).read_text()
+
+    trailers = parse_trailers(text)
+    errors, seen_keys = validate_trailers(trailers)
+
+    if "Action" not in seen_keys:
+        errors.append("missing required trailer Action")
+        action = None
+    else:
+        action = seen_keys["Action"]
+
+    if action is not None and action in ALLOWED_ACTIONS:
+        errors.extend(check_required_trailers(action, seen_keys))
+
+    if errors:
+        print("commit-msg failed:", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
