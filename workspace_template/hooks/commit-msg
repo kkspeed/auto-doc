@@ -6,7 +6,9 @@ file-set whitelist, scope (≤ patch_max_sections per merge commit), and decided
 section immutability. See docs/superpowers/specs/2026-05-24-workspace-bootstrap-
 and-hooks-design.md §3.6.
 """
+import fnmatch
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -46,6 +48,76 @@ TRAILER_REQUIREMENTS = {
     "spawn-failed": {"Variant", "Round"},
     "output-parse-fail": {"Variant", "Round"},
 }
+
+
+# ----- File-set whitelist -----------------------------------------------------
+
+
+def _match_glob(file_path, pattern):
+    """Match file_path against a glob pattern. Treats `*` as not crossing `/`."""
+    file_parts = file_path.split("/")
+    pat_parts = pattern.split("/")
+    if len(file_parts) != len(pat_parts):
+        return False
+    return all(fnmatch.fnmatch(fp, pp)
+               for fp, pp in zip(file_parts, pat_parts))
+
+
+ACTION_FILE_WHITELIST = {
+    "init": None,  # no restriction
+    "merge": [
+        "variants/nodes/v-*/doc/*.md",
+        "variants/nodes/v-*/claims/cl-*.json",
+        "variants/nodes/v-*/attacks/at-*.json",
+        "evidence/ev-*.md",
+        "rejections/rj-*.md",
+        "variants/nodes/v-*/scorecard.json",
+        "actions.jsonl",
+    ],
+    "register-decision": [
+        "goal.toml",
+        "derived/decisions.json",
+        "actions.jsonl",
+    ],
+    "canonicalize": [
+        "variants/nodes/v-*/claims/cl-*.json",
+        "derived/canonical_slug_registry.json",
+        "actions.jsonl",
+    ],
+    "registry-sync": [
+        "variants/nodes/v-*/doc/*.md",
+        "derived/decisions.json",
+        "derived/canonical_slug_registry.json",
+        "actions.jsonl",
+    ],
+    "reviewer-rejected": ["rejections/rj-*.md", "actions.jsonl"],
+    "phase-a-fail": ["rejections/rj-*.md", "actions.jsonl"],
+    "phase-b-fail": ["rejections/rj-*.md", "actions.jsonl"],
+    "phase-c-dispute": ["rejections/rj-*.md", "actions.jsonl"],
+    "spawn-failed": ["rejections/rj-*.md", "actions.jsonl"],
+    "output-parse-fail": ["rejections/rj-*.md", "actions.jsonl"],
+}
+
+
+def staged_files():
+    out = subprocess.check_output(
+        ["git", "diff", "--cached", "--name-only"]
+    ).decode()
+    return [p for p in out.strip().split("\n") if p]
+
+
+def check_file_whitelist(action, files):
+    errors = []
+    whitelist = ACTION_FILE_WHITELIST.get(action)
+    if whitelist is None:
+        return errors
+    for f in files:
+        if not any(_match_glob(f, pattern) for pattern in whitelist):
+            errors.append(
+                f"scope-violation: Action: {action} does not allow "
+                f"staged file {f!r}; allowed patterns: {whitelist}"
+            )
+    return errors
 
 
 # ----- Trailer parsing --------------------------------------------------------
@@ -134,6 +206,8 @@ def main():
 
     if action is not None and action in ALLOWED_ACTIONS:
         errors.extend(check_required_trailers(action, seen_keys))
+        files = staged_files()
+        errors.extend(check_file_whitelist(action, files))
 
     if errors:
         print("commit-msg failed:", file=sys.stderr)
