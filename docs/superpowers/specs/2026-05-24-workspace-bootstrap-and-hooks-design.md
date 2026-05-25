@@ -74,7 +74,7 @@ harness init <dir> [--reactivate]
 2. Create `<dir>` if needed.
 3. Copy the entire contents of `workspace_template/` into `<dir>`, preserving directory structure and executable bits on `hooks/*`.
 4. Run `git init <dir>` (creates `<dir>/.git/`).
-5. Run `git -C <dir> config core.hooksPath workspace/hooks/`. (Note: the template ships its hooks under `workspace/hooks/` from the project-root layout per parent design §1; `harness init` writes them into `<dir>/workspace/hooks/`. The hooksPath config points there.)
+5. Run `git -C <dir> config core.hooksPath hooks/`. (v0 simplification: hooks live at `<dir>/hooks/` rather than the parent design's nested `<dir>/workspace/hooks/`. The parent design's project-root/workspace/ split was driven by anticipated `repo/`, `sources/`, and `.harness/` siblings that v0 doesn't have; flattening the layout removes a level of indirection without losing forward-compatibility — if those siblings land in v0.2+, they can move under a `workspace/` subdirectory then.)
 6. Stage the initial scaffold and commit with message:
    ```
    harness: scaffold workspace
