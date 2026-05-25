@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Pre-commit hook for the Design Doc Evolution Harness.
+
+Self-contained: does NOT import harness/. Duplicates the schema validators
+inline per the inline-duplication-over-import-coupling decision. A parity
+test (tests/test_hook_parity.py) ensures the inlined logic stays in sync
+with harness/claim_graph.py.
+
+Checks: cl-*.json schema, at-*.json schema, cross-field validators
+(decision_id resolution, vacuous slug, alias rewriting).
+
+TODO (Task 4): citation resolution — scan staged .md files for [^ev-*] cites
+and verify each resolves to a non-superseded evidence file.
+
+Action-aware checks (scope, immutability) live in the commit-msg hook because
+pre-commit cannot read the commit's Action trailer.
+"""
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+# ----- Duplicated from harness/claim_graph.py --------------------------------
+
+
+class SchemaError(ValueError):
+    pass
+
+
+class RegistryInvariantError(RuntimeError):
+    pass
+
+
+CLAIM_TYPES = frozenset({"decision", "observation", "inference",
+                         "out_of_scope", "unresolved"})
+AT_TYPES = frozenset({"dispute_claim", "propose_decision_cut",
+                      "propose_canonicalization"})
+CANONICALIZATION_KINDS = frozenset({"decision_id", "position"})
+CONFIDENCES = frozenset({"high", "medium", "low"})
+DECISION_STATUSES = frozenset({"open", "proposed", "retired"})
+
+VACUOUS_POSITION_SLUGS = frozenset({
+    "tbd", "unclear", "unknown", "not-decided", "not-yet-decided",
+    "na", "none", "n-a", "tbd_", "unclear_", "unknown_",
+    "not_decided", "not_yet_decided", "n_a",
+})
+
+SLUG_REGEX = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$")
+
+
+def _require(condition, msg):
+    if not condition:
+        raise SchemaError(msg)
+
+
+def _require_enum(value, allowed, field_name):
+    _require(value in allowed,
+             f"{field_name} must be one of {sorted(allowed)}, got {value!r}")
+
+
+def _require_slug(value, field_name):
+    _require(isinstance(value, str), f"{field_name} must be a string")
+    _require(SLUG_REGEX.match(value) is not None,
+             f"{field_name} {value!r} is not kebab-case ASCII "
+             f"(regex ^[a-z][a-z0-9-]*[a-z0-9]$)")
+
+
+def validate_claim_dict(d):
+    """Run the same schema validation as Claim.from_dict (full duplication)."""
+    for required in ("id", "section_id", "decision_id", "claim_type",
+                     "evidence_ids", "assertion"):
+        _require(required in d, f"Claim missing required field {required!r}")
+    _require_enum(d["claim_type"], CLAIM_TYPES, "claim_type")
+    _require_slug(d["decision_id"], "decision_id")
+    _require(isinstance(d["evidence_ids"], list),
+             "evidence_ids must be a list")
+    claim_type = d["claim_type"]
+    position = d.get("position")
+    out_of_scope_rationale = d.get("out_of_scope_rationale")
+    if claim_type == "out_of_scope":
+        _require(out_of_scope_rationale is not None,
+                 "out_of_scope claim must have out_of_scope_rationale")
+        _require(position is None,
+                 "out_of_scope claim must NOT have position")
+    elif claim_type == "unresolved":
+        _require(position is None,
+                 "unresolved claim must NOT have position")
+    else:
+        _require(position is not None,
+                 f"{claim_type} claim must have position")
+        _require_slug(position, "position")
+
+
+def validate_attack_dict(d):
+    """Run the same schema validation as Attack.from_dict."""
+    _require("id" in d, "Attack missing 'id'")
+    _require("at_type" in d, "Attack missing 'at_type'")
+    _require_enum(d["at_type"], AT_TYPES, "at_type")
+    at_type = d["at_type"]
+    if at_type == "dispute_claim":
+        for req in ("target_claim_id", "argument"):
+            _require(req in d, f"dispute_claim missing {req!r}")
+    elif at_type == "propose_decision_cut":
+        for req in ("target_decision_id", "rationale"):
+            _require(req in d, f"propose_decision_cut missing {req!r}")
+        _require_slug(d["target_decision_id"], "target_decision_id")
+    elif at_type == "propose_canonicalization":
+        for req in ("kind", "from", "to", "confidence", "rationale"):
+            _require(req in d, f"propose_canonicalization missing {req!r}")
+        _require_enum(d["kind"], CANONICALIZATION_KINDS, "kind")
+        _require_enum(d["confidence"], CONFIDENCES, "confidence")
+        _require_slug(d["from"], "from")
+        _require_slug(d["to"], "to")
+        if d["kind"] == "position":
+            _require("scope" in d,
+                     "propose_canonicalization kind=position requires scope")
+            _require_slug(d["scope"], "scope")
+
+
+def validate_claim_decision_id_resolution(claim_dict, decisions):
+    """decisions: {decision_id: {"status": ..., ...}} from derived/decisions.json."""
+    decision_id = claim_dict["decision_id"]
+    if decision_id in decisions:
+        if decisions[decision_id]["status"] == "retired":
+            raise SchemaError(
+                f"Claim {claim_dict['id']} references retired decision "
+                f"{decision_id!r}; new claims may not reference retired decisions"
+            )
+        return
+    proposed = claim_dict.get("proposed_decision")
+    if proposed is None:
+        raise SchemaError(
+            f"Claim {claim_dict['id']} decision_id {decision_id!r} is not "
+            "registered and no proposed_decision payload is present"
+        )
+    if proposed.get("id") != decision_id:
+        raise SchemaError(
+            f"Claim {claim_dict['id']} proposed_decision.id "
+            f"({proposed.get('id')!r}) does not match decision_id ({decision_id!r})"
+        )
+
+
+def validate_claim_position_not_vacuous(claim_dict):
+    position = claim_dict.get("position")
+    if position is None:
+        return
+    if position in VACUOUS_POSITION_SLUGS:
+        raise SchemaError(
+            f"Claim {claim_dict['id']} has vacuous position slug {position!r}; "
+            f"use claim_type=unresolved if you genuinely lack a position"
+        )
+
+
+def validate_claim_position_not_alias(claim_dict, registry):
+    """registry: {decision_id: {"canonical": [...], "aliases": {...}}}"""
+    position = claim_dict.get("position")
+    if position is None:
+        return
+    entry = registry.get(claim_dict["decision_id"])
+    if entry is None:
+        return
+    aliases = entry.get("aliases", {})
+    if position in aliases:
+        canonical = aliases[position]
+        raise SchemaError(
+            f"Claim {claim_dict['id']} position {position!r} is an alias of "
+            f"canonical {canonical!r} under decision {claim_dict['decision_id']!r}; "
+            f"use the canonical slug"
+        )
+
+
+# ----- Hook helpers -----------------------------------------------------------
+
+
+def staged_files():
+    out = subprocess.check_output(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=AM"]
+    ).decode()
+    return [p for p in out.strip().split("\n") if p]
+
+
+def load_decisions():
+    p = Path("derived/decisions.json")
+    if not p.exists():
+        return {}
+    with p.open() as f:
+        data = json.load(f)
+    return data.get("decisions", {})
+
+
+def load_registry():
+    p = Path("derived/canonical_slug_registry.json")
+    if not p.exists():
+        return {}
+    with p.open() as f:
+        return json.load(f)
+
+
+def is_claim_file(path_str):
+    parts = path_str.split("/")
+    return (len(parts) >= 4 and parts[-2] == "claims"
+            and parts[-1].startswith("cl-") and parts[-1].endswith(".json"))
+
+
+def is_attack_file(path_str):
+    parts = path_str.split("/")
+    return (len(parts) >= 4 and parts[-2] == "attacks"
+            and parts[-1].startswith("at-") and parts[-1].endswith(".json"))
+
+
+# ----- Main -------------------------------------------------------------------
+
+
+def main():
+    errors = []
+    decisions = load_decisions()
+    registry = load_registry()
+
+    for f in staged_files():
+        if is_claim_file(f):
+            try:
+                with open(f) as fp:
+                    data = json.load(fp)
+                validate_claim_dict(data)
+                validate_claim_decision_id_resolution(data, decisions)
+                validate_claim_position_not_vacuous(data)
+                validate_claim_position_not_alias(data, registry)
+            except (SchemaError, json.JSONDecodeError) as e:
+                errors.append(f"{f}: {e}")
+        elif is_attack_file(f):
+            try:
+                with open(f) as fp:
+                    data = json.load(fp)
+                validate_attack_dict(data)
+            except (SchemaError, json.JSONDecodeError) as e:
+                errors.append(f"{f}: {e}")
+
+    if errors:
+        print("pre-commit failed:", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
