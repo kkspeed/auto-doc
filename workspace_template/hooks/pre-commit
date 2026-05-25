@@ -28,8 +28,11 @@ class SchemaError(ValueError):
     pass
 
 
-class RegistryInvariantError(RuntimeError):
-    pass
+# Note: harness/claim_graph.py defines RegistryInvariantError for its
+# mutating registry operations (add_canonical_position, register_alias,
+# apply_canonicalization). The hook does not perform those operations
+# — registry mutation is the orchestrator's job — so the class is
+# omitted here. The parity test docstring documents this scope choice.
 
 
 CLAIM_TYPES = frozenset({"decision", "observation", "inference",

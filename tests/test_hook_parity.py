@@ -1,6 +1,17 @@
 """Parity test: the inlined validators in workspace_template/hooks/pre-commit
 must produce identical verdicts to the canonical validators in
 harness/claim_graph.py for every fixture.
+
+Scope:
+  - Claim and Attack schema validators (from_dict semantics)
+  - Cross-field validators (decision_id resolution, vacuous slug, alias)
+
+NOT in scope:
+  - Registry/Decision shape invariants. The hook trusts the on-disk shape
+    of derived/decisions.json and derived/canonical_slug_registry.json
+    (which the orchestrator writes, not agents). If harness.claim_graph
+    later tightens registry invariants, that divergence is NOT a parity
+    failure; the hook's contract is validate-what-agents-emit.
 """
 import unittest
 from pathlib import Path

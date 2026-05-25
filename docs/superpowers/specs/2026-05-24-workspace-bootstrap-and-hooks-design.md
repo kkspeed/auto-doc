@@ -223,7 +223,7 @@ Any unknown trailer key OR value outside its enum → reject with a specific err
 The hook reads the staged file list (`git diff --cached --name-only`) and ensures every file matches one of the Action's allowed paths:
 
 - `init` — no restriction.
-- `merge` — `variants/nodes/v-*/doc/*.md`, `variants/nodes/v-*/claims/cl-*.json`, `variants/nodes/v-*/attacks/at-*.json`, `evidence/ev-*.md`, `rejections/rj-*.md`, `variants/nodes/v-*/scorecard.json`, `actions.jsonl`.
+- `merge` — `variants/nodes/v-*/doc/*.md`, `variants/nodes/v-*/claims/cl-*.json`, `variants/nodes/v-*/attacks/at-*.json`, `evidence/ev-*.md`, `rejections/rj-*.md`, `variants/nodes/v-*/scorecard.json`, `actions.jsonl`, and `goal.toml` (only when co-staged for the decided-section-immutability escape hatch documented below — a body change on a decided section is authorized iff `goal.toml` is also in the staged set with a `goal_version` bump). Anything else → reject.
 - `register-decision` — `goal.toml`, `derived/decisions.json`, `actions.jsonl`.
 - `canonicalize` — `variants/nodes/v-*/claims/cl-*.json`, `derived/canonical_slug_registry.json`, `actions.jsonl`.
 - `registry-sync` — `variants/nodes/v-*/doc/*.md`, `derived/decisions.json`, `derived/canonical_slug_registry.json`, `actions.jsonl`.
