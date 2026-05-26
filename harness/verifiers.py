@@ -18,6 +18,22 @@ Public API:
 
   Internal (exposed for unit testing):
     - _normalize_text
+
+v0 trade-offs (deferred to v0.1+):
+  - Sentence splitter uses naive `.!?` boundaries; abbreviations like
+    `e.g.`, `Mr.`, version strings like `v1.2.3`, and decimals like
+    `0.92` trigger false-positive sentence boundaries. Fix path:
+    NLTK Punkt or similar smarter splitter when real overnight runs
+    surface high false-positive density.
+  - Indented code blocks (4-space) are not stripped — only fenced
+    blocks. Periods inside indented examples count as sentence
+    boundaries. Acceptable since fenced is the recommended form.
+  - `excerpt_diff` is computed on normalized single-line text, so
+    the unified-diff output is always single-hunk. Word-level diff
+    (via ndiff) would improve debuggability.
+  - Performance: each evidence file is re-read per cite occurrence.
+    At ~100 rounds × ~5 cites/round this is negligible; if real
+    runs surface hot paths, add a per-invocation cache.
 """
 from __future__ import annotations
 
@@ -33,7 +49,7 @@ from pathlib import Path
 # ----- Dataclasses ------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class VerifierFailure:
     kind: str           # "uncited-claim" | "dangling-cite" | "superseded-cite" | "excerpt-mismatch"
     variant: str        # "v-001"
@@ -85,8 +101,8 @@ def _normalize_text(s: str) -> str:
 
 
 def _walk_sections(variants_nodes_root: Path):
-    """Yield (variant_name, section_path, tags, body) for every well-formed
-    section under variants_nodes_root.
+    """Yield (variant_name, section_path, tags, body, raw_tags) for every
+    well-formed section under variants_nodes_root.
 
     Skips silently when:
       - variants_nodes_root does not exist
@@ -124,11 +140,10 @@ def _walk_sections(variants_nodes_root: Path):
                 meta = tomllib.loads(frontmatter_text)
             except tomllib.TOMLDecodeError:
                 continue
-            tags = meta.get("tags", [])
-            if not isinstance(tags, list):
-                tags = []
+            raw_tags = meta.get("tags", [])
+            tags = raw_tags if isinstance(raw_tags, list) else []
             rel_path = str(md.relative_to(variants_nodes_root.parent.parent))
-            yield variant_dir.name, rel_path, tags, body
+            yield variant_dir.name, rel_path, tags, body, raw_tags
 
 
 # ----- Verifier A.1: citation completeness ------------------------------------
@@ -138,7 +153,12 @@ _FENCED_CODE_RE = re.compile(r"```[^\n]*\n.*?\n```", re.DOTALL)
 _HEADING_LINE_RE = re.compile(r"^#{1,6}(\s.*)?$", re.MULTILINE)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?:\s+|\Z)")
 _CITE_RE = re.compile(r"\[\^ev-(\d{6})\]")
-_LETTER_RE = re.compile(r"[A-Za-z]")
+# Unicode-aware letter detection — \w with re.UNICODE matches any Unicode
+# word character (letters + digits + _). We exclude digits/underscore via
+# the second test below using unicodedata. For v0, the simpler matcher is
+# `re.compile(r"[^\W\d_]", re.UNICODE)` which means "word char that is not
+# a digit and not an underscore" — effectively any Unicode letter category.
+_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 
 
 def verify_citation_completeness(variants_nodes_root: Path) -> VerifierResult:
@@ -146,7 +166,16 @@ def verify_citation_completeness(variants_nodes_root: Path) -> VerifierResult:
     [^ev-NNNNNN] cite.
     """
     failures: list[VerifierFailure] = []
-    for variant, section_path, tags, body in _walk_sections(variants_nodes_root):
+    for variant, section_path, tags, body, raw_tags in _walk_sections(variants_nodes_root):
+        if not isinstance(raw_tags, list):
+            failures.append(VerifierFailure(
+                kind="malformed-frontmatter",
+                variant=variant,
+                section_path=section_path,
+                detail=f"tags field is {type(raw_tags).__name__!r}, "
+                       "expected a list — section will be treated as "
+                       "non-decided (SC4 bypass risk)",
+            ))
         if "decided" not in tags:
             continue
         prose = _FENCED_CODE_RE.sub("", body)
@@ -204,7 +233,7 @@ def verify_cite_resolution(
     evidence file. Applies to ALL sections, not just decided.
     """
     failures: list[VerifierFailure] = []
-    for variant, section_path, _tags, body in _walk_sections(variants_nodes_root):
+    for variant, section_path, _tags, body, _raw_tags in _walk_sections(variants_nodes_root):
         for m in _CITE_RE.finditer(body):
             ev_num = m.group(1)
             ev_path = evidence_root / f"ev-{ev_num}.md"
@@ -296,7 +325,7 @@ def verify_excerpt_match(
     verify_cite_resolution. This avoids double-reporting on the same cite.
     """
     failures: list[VerifierFailure] = []
-    for variant, section_path, _tags, body in _walk_sections(variants_nodes_root):
+    for variant, section_path, _tags, body, _raw_tags in _walk_sections(variants_nodes_root):
         for m in _CITE_RE.finditer(body):
             ev_num = m.group(1)
             ev_path = evidence_root / f"ev-{ev_num}.md"

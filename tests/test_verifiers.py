@@ -130,7 +130,7 @@ class WalkSectionsTest(unittest.TestCase):
         self.assertEqual(bodies["v-001"], "body 1\n")
         self.assertEqual(bodies["v-002"], "body 2\n")
         # Verify section_path uses the variants/nodes/ prefix
-        for variant, section_path, _tags, _body in found:
+        for variant, section_path, _tags, _body, _raw_tags in found:
             self.assertTrue(section_path.startswith("variants/nodes/"),
                             f"section_path {section_path!r} should start "
                             f"with 'variants/nodes/'")
@@ -249,6 +249,20 @@ class VerifyCitationCompletenessTest(unittest.TestCase):
         _write_section(self.variants, "v-001", "01-empty", ["decided"], "")
         result = v.verify_citation_completeness(self.variants)
         self.assertEqual(result.verdict, "pass")
+
+    def test_malformed_tags_emits_warning(self):
+        # tags is a string (typo) instead of a list — should emit a
+        # malformed-frontmatter failure rather than silently skipping
+        doc_dir = self.variants / "v-001" / "doc"
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        # Hand-write the section to use a bad tags value
+        (doc_dir / "01-x.md").write_text(
+            '+++\nsection_id = "x"\ntags = "decided"\n+++\nbody [^ev-000001].\n'
+        )
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "fail")
+        kinds = [f.kind for f in result.failures]
+        self.assertIn("malformed-frontmatter", kinds)
 
 
 class VerifyCiteResolutionTest(unittest.TestCase):
