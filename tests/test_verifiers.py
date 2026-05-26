@@ -327,5 +327,103 @@ class VerifyCiteResolutionTest(unittest.TestCase):
         self.assertEqual(result.verdict, "fail")
 
 
+class VerifyExcerptMatchTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.variants = self.td / "variants" / "nodes"
+        self.evidence = self.td / "evidence"
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_verbatim_match_passes(self):
+        excerpt = "Retry policy uses exponential backoff with full jitter."
+        _write_evidence(self.evidence, "000001", excerpt=excerpt)
+        body = "Retry policy uses exponential backoff with full jitter [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "pass", f"failures: {result.failures}")
+
+    def test_smart_quote_drift_passes_after_normalization(self):
+        # Excerpt has straight quotes; doc has smart quotes; should still match.
+        excerpt = 'The system uses "exponential backoff" with jitter.'
+        _write_evidence(self.evidence, "000001", excerpt=excerpt)
+        body = 'The system uses “exponential backoff” with jitter [^ev-000001].\n'
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "pass", f"failures: {result.failures}")
+
+    def test_truly_different_sentence_fails_with_excerpt_diff(self):
+        excerpt = "Use TCP keepalive with a 30-second interval."
+        _write_evidence(self.evidence, "000001", excerpt=excerpt)
+        body = "Retry policy uses exponential backoff with full jitter [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].kind, "excerpt-mismatch")
+        self.assertIsNotNone(result.failures[0].excerpt_diff)
+
+    def test_evidence_missing_excerpt_field_fails(self):
+        # Evidence file with no excerpt= field
+        _write_evidence(self.evidence, "000001")  # no excerpt passed
+        body = "Some claim [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(result.failures[0].kind, "excerpt-mismatch")
+        self.assertIn("no excerpt", result.failures[0].detail)
+
+    def test_threshold_parameter_respected(self):
+        # Same fixture: short excerpt, longer body sentence — moderate match.
+        excerpt = "exponential backoff with full jitter"
+        _write_evidence(self.evidence, "000001", excerpt=excerpt)
+        body = "The retry policy uses exponential backoff with full jitter for transient failures [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        permissive = v.verify_excerpt_match(self.variants, self.evidence,
+                                            threshold=0.5)
+        strict = v.verify_excerpt_match(self.variants, self.evidence,
+                                        threshold=0.99)
+        self.assertEqual(permissive.verdict, "pass")
+        self.assertEqual(strict.verdict, "fail")
+
+    def test_multiple_cites_in_one_sentence_each_checked_independently(self):
+        _write_evidence(self.evidence, "000001",
+                        excerpt="Retry policy uses exponential backoff with full jitter.")
+        _write_evidence(self.evidence, "000002",
+                        excerpt="Use TCP keepalive with a 30-second interval.")
+        # One sentence cites both: first cite matches, second doesn't.
+        body = (
+            "Retry policy uses exponential backoff with full jitter "
+            "[^ev-000001] [^ev-000002].\n"
+        )
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        # ev-000001 matches; ev-000002 mismatches → exactly 1 failure
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn("000002", result.failures[0].detail)
+
+    def test_cite_at_start_of_paragraph_extracts_sentence_correctly(self):
+        excerpt = "First sentence in paragraph."
+        _write_evidence(self.evidence, "000001", excerpt=excerpt)
+        body = (
+            "Some preamble.\n"
+            "\n"
+            "First sentence in paragraph [^ev-000001]. Second sentence.\n"
+        )
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "pass", f"failures: {result.failures}")
+
+    def test_cite_with_no_surrounding_punctuation_falls_back_to_paragraph_as_needle(self):
+        # No sentence-ending punctuation in the paragraph at all
+        excerpt = "Single fragment with no terminator"
+        _write_evidence(self.evidence, "000001", excerpt=excerpt)
+        body = "Single fragment with no terminator [^ev-000001]"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "pass", f"failures: {result.failures}")
+
+
 if __name__ == "__main__":
     unittest.main()

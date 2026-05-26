@@ -233,3 +233,109 @@ def verify_cite_resolution(
         verdict="fail" if failures else "pass",
         failures=failures,
     )
+
+
+# ----- Verifier B: excerpt match ----------------------------------------------
+
+
+import difflib
+
+_SENTENCE_BOUNDARY_BACK_RE = re.compile(r"[.!?]|\n\n")
+
+
+def _extract_sentence_containing(body: str, pos: int) -> str:
+    """Return the sentence in `body` containing the character at offset `pos`.
+
+    Scans backward to the most recent sentence-end punctuation or paragraph
+    break (or start of body) and forward to the next sentence-end punctuation
+    or paragraph break (or end of body). If no boundary is found in either
+    direction, the entire paragraph containing pos is returned as a fallback.
+    """
+    # Backward scan
+    start = 0
+    for i in range(pos - 1, -1, -1):
+        ch = body[i]
+        if ch in ".!?":
+            start = i + 1
+            break
+        if ch == "\n" and i > 0 and body[i - 1] == "\n":
+            start = i + 1
+            break
+    # Forward scan
+    end = len(body)
+    i = pos
+    while i < len(body):
+        ch = body[i]
+        if ch in ".!?":
+            end = i + 1
+            break
+        if ch == "\n" and i + 1 < len(body) and body[i + 1] == "\n":
+            end = i
+            break
+        i += 1
+    needle = body[start:end].strip()
+    if needle:
+        return needle
+    # Fallback: entire paragraph
+    para_start = body.rfind("\n\n", 0, pos)
+    para_start = 0 if para_start == -1 else para_start + 2
+    para_end = body.find("\n\n", pos)
+    para_end = len(body) if para_end == -1 else para_end
+    return body[para_start:para_end].strip()
+
+
+def verify_excerpt_match(
+    variants_nodes_root: Path,
+    evidence_root: Path,
+    threshold: float = 0.92,
+) -> VerifierResult:
+    """For each [^ev-NNNNNN] cite, normalize the surrounding sentence and the
+    cited evidence file's `excerpt` field, then compute a difflib ratio.
+    Fail if ratio < threshold.
+
+    Skips dangling/malformed evidence files silently — those are owned by
+    verify_cite_resolution. This avoids double-reporting on the same cite.
+    """
+    failures: list[VerifierFailure] = []
+    for variant, section_path, _tags, body in _walk_sections(variants_nodes_root):
+        for m in _CITE_RE.finditer(body):
+            ev_num = m.group(1)
+            ev_path = evidence_root / f"ev-{ev_num}.md"
+            meta = _load_evidence_frontmatter(ev_path)
+            if meta is None:
+                continue   # owned by verify_cite_resolution
+            excerpt = meta.get("excerpt")
+            if not excerpt:
+                failures.append(VerifierFailure(
+                    kind="excerpt-mismatch",
+                    variant=variant,
+                    section_path=section_path,
+                    detail=f"ev-{ev_num} frontmatter has no excerpt field",
+                ))
+                continue
+            needle = _extract_sentence_containing(body, m.start())
+            # Strip cite tokens from the needle before comparison so they don't
+            # inflate or deflate the similarity score.
+            needle_clean = _CITE_RE.sub("", needle)
+            n_needle = _normalize_text(needle_clean)
+            n_excerpt = _normalize_text(excerpt)
+            ratio = difflib.SequenceMatcher(None, n_needle, n_excerpt).ratio()
+            if ratio < threshold:
+                diff = "\n".join(difflib.unified_diff(
+                    n_excerpt.splitlines() or [""],
+                    n_needle.splitlines() or [""],
+                    fromfile="excerpt", tofile="needle",
+                    lineterm="", n=1,
+                ))
+                failures.append(VerifierFailure(
+                    kind="excerpt-mismatch",
+                    variant=variant,
+                    section_path=section_path,
+                    detail=f"ev-{ev_num} excerpt match ratio={ratio:.3f} "
+                           f"below threshold {threshold}",
+                    excerpt_diff=diff,
+                ))
+    return VerifierResult(
+        verdict="fail" if failures else "pass",
+        failures=failures,
+    )
