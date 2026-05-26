@@ -372,7 +372,7 @@ class VerifyExcerptMatchTest(unittest.TestCase):
         result = v.verify_excerpt_match(self.variants, self.evidence)
         self.assertEqual(result.verdict, "fail")
         self.assertEqual(result.failures[0].kind, "excerpt-mismatch")
-        self.assertIn("no excerpt", result.failures[0].detail)
+        self.assertIn("no usable excerpt", result.failures[0].detail)
 
     def test_threshold_parameter_respected(self):
         # Same fixture: short excerpt, longer body sentence — moderate match.

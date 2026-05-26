@@ -21,10 +21,13 @@ Public API:
 """
 from __future__ import annotations
 
+import difflib
 import re
 import string
+import tomllib
 import unicodedata
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 # ----- Dataclasses ------------------------------------------------------------
@@ -72,15 +75,13 @@ def _normalize_text(s: str) -> str:
     s = s.translate(_SMART_MAP)
     s = s.lower()
     s = _WS_RE.sub(" ", s).strip()
-    s = " ".join(w.strip(_PUNCT_STRIP) for w in s.split(" "))
+    # Filter empty tokens after punctuation strip — a word like "." reduces
+    # to "" and would otherwise produce a double space in the output.
+    s = " ".join(t for t in (w.strip(_PUNCT_STRIP) for w in s.split(" ")) if t)
     return s
 
 
 # ----- Section walker ---------------------------------------------------------
-
-
-import tomllib
-from pathlib import Path
 
 
 def _walk_sections(variants_nodes_root: Path):
@@ -105,7 +106,10 @@ def _walk_sections(variants_nodes_root: Path):
         if not doc_dir.exists():
             continue
         for md in sorted(doc_dir.glob("*.md")):
-            text = md.read_text()
+            # errors="replace" prevents a single non-UTF-8 byte from killing
+            # the entire walk. The lossy replacement may make a few characters
+            # mis-match in Verifier B, which is the right trade-off vs aborting.
+            text = md.read_text(encoding="utf-8", errors="replace")
             if not text.startswith("+++"):
                 continue
             end = text.find("+++", 3)
@@ -180,7 +184,7 @@ def _load_evidence_frontmatter(ev_path: Path) -> dict | None:
     None if the file is missing, lacks a +++ fence, or fails to parse."""
     if not ev_path.exists():
         return None
-    text = ev_path.read_text()
+    text = ev_path.read_text(encoding="utf-8", errors="replace")
     if not text.startswith("+++"):
         return None
     end = text.find("+++", 3)
@@ -236,9 +240,6 @@ def verify_cite_resolution(
 
 
 # ----- Verifier B: excerpt match ----------------------------------------------
-
-
-import difflib
 
 
 def _extract_sentence_containing(body: str, pos: int) -> str:
@@ -303,12 +304,15 @@ def verify_excerpt_match(
             if meta is None:
                 continue   # owned by verify_cite_resolution
             excerpt = meta.get("excerpt")
-            if not excerpt:
+            if not excerpt or not isinstance(excerpt, str) or not excerpt.strip():
+                # Covers: field absent, non-string value (array/int/bool),
+                # empty string, and whitespace-only string. All are treated
+                # as "no usable excerpt" — same failure kind, same detail.
                 failures.append(VerifierFailure(
                     kind="excerpt-mismatch",
                     variant=variant,
                     section_path=section_path,
-                    detail=f"ev-{ev_num} frontmatter has no excerpt field",
+                    detail=f"ev-{ev_num} frontmatter has no usable excerpt field",
                 ))
                 continue
             needle = _extract_sentence_containing(body, m.start())
