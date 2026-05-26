@@ -251,5 +251,81 @@ class VerifyCitationCompletenessTest(unittest.TestCase):
         self.assertEqual(result.verdict, "pass")
 
 
+class VerifyCiteResolutionTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.variants = self.td / "variants" / "nodes"
+        self.evidence = self.td / "evidence"
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_cite_to_existing_non_superseded_evidence_passes(self):
+        _write_evidence(self.evidence, "000001", excerpt="x")
+        body = "Some claim [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_cite_resolution(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "pass")
+
+    def test_cite_to_missing_evidence_fails_with_dangling_cite_kind(self):
+        body = "Some claim [^ev-999999].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_cite_resolution(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].kind, "dangling-cite")
+        self.assertIn("999999", result.failures[0].detail)
+
+    def test_cite_to_malformed_evidence_frontmatter_fails_with_dangling_cite_kind(self):
+        # Evidence file exists but has unparseable TOML frontmatter
+        self.evidence.mkdir(parents=True, exist_ok=True)
+        (self.evidence / "ev-000001.md").write_text(
+            '+++\nthis is = "not [ valid TOML\n+++\nbody\n'
+        )
+        body = "Some claim [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_cite_resolution(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].kind, "dangling-cite")
+        self.assertIn("malformed frontmatter", result.failures[0].detail)
+
+    def test_cite_to_superseded_evidence_fails_with_superseded_cite_kind(self):
+        _write_evidence(self.evidence, "000001", excerpt="x",
+                        superseded_by="ev-000002")
+        _write_evidence(self.evidence, "000002", excerpt="y")
+        body = "Some claim [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_cite_resolution(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].kind, "superseded-cite")
+        self.assertIn("ev-000002", result.failures[0].detail)
+
+    def test_multiple_cites_mix_of_pass_and_fail_collects_all_failures(self):
+        _write_evidence(self.evidence, "000001", excerpt="x")
+        # 000002 missing; 000003 superseded
+        _write_evidence(self.evidence, "000003", excerpt="z",
+                        superseded_by="ev-000004")
+        body = (
+            "Good cite [^ev-000001].\n"
+            "Missing [^ev-000002].\n"
+            "Superseded [^ev-000003].\n"
+        )
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_cite_resolution(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 2)
+        kinds = sorted(f.kind for f in result.failures)
+        self.assertEqual(kinds, ["dangling-cite", "superseded-cite"])
+
+    def test_unresolved_section_cites_still_checked(self):
+        # Cite-resolution applies to ALL sections, not just decided.
+        body = "Some claim [^ev-999999].\n"
+        _write_section(self.variants, "v-001", "01-x", ["unresolved"], body)
+        result = v.verify_cite_resolution(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "fail")
+
+
 if __name__ == "__main__":
     unittest.main()

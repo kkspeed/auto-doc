@@ -133,7 +133,7 @@ def _walk_sections(variants_nodes_root: Path):
 _FENCED_CODE_RE = re.compile(r"```[^\n]*\n.*?\n```", re.DOTALL)
 _HEADING_LINE_RE = re.compile(r"^#{1,6}(\s.*)?$", re.MULTILINE)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?:\s+|\Z)")
-_CITE_RE = re.compile(r"\[\^ev-\d{6}\]")
+_CITE_RE = re.compile(r"\[\^ev-(\d{6})\]")
 _LETTER_RE = re.compile(r"[A-Za-z]")
 
 
@@ -166,6 +166,69 @@ def verify_citation_completeness(variants_nodes_root: Path) -> VerifierResult:
                 section_path=section_path,
                 detail=f"Sentence ends '{preview}' but has no [^ev-*] cite",
             ))
+    return VerifierResult(
+        verdict="fail" if failures else "pass",
+        failures=failures,
+    )
+
+
+# ----- Verifier A.2: cite resolution ------------------------------------------
+
+
+def _load_evidence_frontmatter(ev_path: Path) -> dict | None:
+    """Read an ev-*.md file and return its parsed TOML frontmatter dict, or
+    None if the file is missing, lacks a +++ fence, or fails to parse."""
+    if not ev_path.exists():
+        return None
+    text = ev_path.read_text()
+    if not text.startswith("+++"):
+        return None
+    end = text.find("+++", 3)
+    if end == -1:
+        return None
+    try:
+        return tomllib.loads(text[3:end])
+    except tomllib.TOMLDecodeError:
+        return None
+
+
+def verify_cite_resolution(
+    variants_nodes_root: Path,
+    evidence_root: Path,
+) -> VerifierResult:
+    """Every [^ev-NNNNNN] cite must resolve to an existing non-superseded
+    evidence file. Applies to ALL sections, not just decided.
+    """
+    failures: list[VerifierFailure] = []
+    for variant, section_path, _tags, body in _walk_sections(variants_nodes_root):
+        for m in _CITE_RE.finditer(body):
+            ev_num = m.group(1)
+            ev_path = evidence_root / f"ev-{ev_num}.md"
+            if not ev_path.exists():
+                failures.append(VerifierFailure(
+                    kind="dangling-cite",
+                    variant=variant,
+                    section_path=section_path,
+                    detail=f"ev-{ev_num} not found at {ev_path}",
+                ))
+                continue
+            meta = _load_evidence_frontmatter(ev_path)
+            if meta is None:
+                failures.append(VerifierFailure(
+                    kind="dangling-cite",
+                    variant=variant,
+                    section_path=section_path,
+                    detail=f"ev-{ev_num} at {ev_path} has malformed frontmatter",
+                ))
+                continue
+            superseded_by = meta.get("superseded_by")
+            if superseded_by:
+                failures.append(VerifierFailure(
+                    kind="superseded-cite",
+                    variant=variant,
+                    section_path=section_path,
+                    detail=f"ev-{ev_num} is superseded_by={superseded_by!r}",
+                ))
     return VerifierResult(
         verdict="fail" if failures else "pass",
         failures=failures,
