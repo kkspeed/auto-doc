@@ -24,6 +24,18 @@ class VerifierFailureDataclassTest(unittest.TestCase):
         )
         self.assertEqual(f.excerpt_diff.count("\n"), 3)
 
+    def test_failure_is_immutable(self):
+        import dataclasses
+        f = v.VerifierFailure(
+            kind="uncited-claim",
+            variant="v-001",
+            section_path="x",
+            detail="y",
+        )
+        # frozen=True causes FrozenInstanceError on assignment
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            f.kind = "mutated"
+
 
 class VerifierResultDataclassTest(unittest.TestCase):
     def test_pass_result_has_empty_failures(self):

@@ -85,6 +85,28 @@ class CommitMsgTrailerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Reviewer", result.stderr)
 
+    def test_crlf_message_parses_trailers(self):
+        # CRLF line endings (Windows tools, some CI runners) must not cause
+        # the trailer parser to lose the Action trailer.
+        msg = _write_msg(self.ws, "subject\r\n\r\nAction: init\r\n")
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 0,
+                         f"stderr: {result.stderr}")
+
+    def test_co_authored_by_case_insensitive_passes(self):
+        # Project default per CLAUDE.md uses title-case Co-Authored-By;
+        # also test lowercase. Git interpret-trailers is case-insensitive.
+        for variant in ("Co-Authored-By", "co-authored-by", "Co-authored-by"):
+            with self.subTest(trailer=variant):
+                msg = _write_msg(
+                    self.ws,
+                    f"subject\n\nAction: init\n{variant}: Bot <bot@example.com>\n",
+                )
+                result = _run_hook(self.ws, msg)
+                self.assertEqual(result.returncode, 0,
+                                 f"trailer {variant!r} should pass; "
+                                 f"stderr: {result.stderr}")
+
 
 def _stage_file(workspace: Path, rel_path: str, content: str = "x\n"):
     """Create a file at rel_path under workspace and force-stage it.
