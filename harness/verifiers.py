@@ -74,3 +74,54 @@ def _normalize_text(s: str) -> str:
     s = _WS_RE.sub(" ", s).strip()
     s = " ".join(w.strip(_PUNCT_STRIP) for w in s.split(" "))
     return s
+
+
+# ----- Section walker ---------------------------------------------------------
+
+
+import tomllib
+from pathlib import Path
+
+
+def _walk_sections(variants_nodes_root: Path):
+    """Yield (variant_name, section_path, tags, body) for every well-formed
+    section under variants_nodes_root.
+
+    Skips silently when:
+      - variants_nodes_root does not exist
+      - a variant has no doc/ subdirectory
+      - a file lacks +++ frontmatter fence
+      - the frontmatter fails to parse as TOML
+
+    section_path is a string relative to variants_nodes_root.parent.parent
+    (i.e., starts with "variants/nodes/...").
+    """
+    if not variants_nodes_root.exists():
+        return
+    for variant_dir in sorted(variants_nodes_root.iterdir()):
+        if not variant_dir.is_dir() or not variant_dir.name.startswith("v-"):
+            continue
+        doc_dir = variant_dir / "doc"
+        if not doc_dir.exists():
+            continue
+        for md in sorted(doc_dir.glob("*.md")):
+            text = md.read_text()
+            if not text.startswith("+++"):
+                continue
+            end = text.find("+++", 3)
+            if end == -1:
+                continue
+            frontmatter_text = text[3:end]
+            body = text[end + 3:]
+            # Strip leading newline from body if present (TOML fence semantics)
+            if body.startswith("\n"):
+                body = body[1:]
+            try:
+                meta = tomllib.loads(frontmatter_text)
+            except tomllib.TOMLDecodeError:
+                continue
+            tags = meta.get("tags", [])
+            if not isinstance(tags, list):
+                tags = []
+            rel_path = str(md.relative_to(variants_nodes_root.parent.parent))
+            yield variant_dir.name, rel_path, tags, body
