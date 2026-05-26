@@ -184,5 +184,72 @@ class WalkSectionsTest(unittest.TestCase):
         self.assertEqual(variants_in_order, ["v-001", "v-002", "v-003"])
 
 
+class VerifyCitationCompletenessTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.variants = self.td / "variants" / "nodes"
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_decided_section_with_cited_sentences_passes(self):
+        body = (
+            "Retry policy uses exponential backoff [^ev-000001].\n"
+            "Maximum five attempts [^ev-000002].\n"
+        )
+        _write_section(self.variants, "v-001", "01-retry", ["decided"], body)
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "pass")
+        self.assertEqual(result.failures, [])
+
+    def test_decided_section_with_uncited_assertion_fails(self):
+        body = (
+            "Retry policy uses exponential backoff [^ev-000001].\n"
+            "We assume the worst case.\n"  # uncited assertion
+        )
+        _write_section(self.variants, "v-001", "01-retry", ["decided"], body)
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].kind, "uncited-claim")
+        self.assertEqual(result.failures[0].variant, "v-001")
+
+    def test_unresolved_section_with_uncited_assertion_passes(self):
+        # Only `decided` sections are checked for completeness
+        body = "We assume the worst case.\n"
+        _write_section(self.variants, "v-001", "01-x", ["unresolved"], body)
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "pass")
+
+    def test_code_blocks_skipped(self):
+        # Sentences inside fenced code blocks don't require cites
+        body = (
+            "Retry policy uses exponential backoff [^ev-000001].\n"
+            "\n"
+            "```\n"
+            "do_something(); // a comment with periods. and more.\n"
+            "```\n"
+        )
+        _write_section(self.variants, "v-001", "01-retry", ["decided"], body)
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "pass",
+                         f"failures: {result.failures}")
+
+    def test_heading_lines_skipped(self):
+        # ATX headings don't require cites
+        body = (
+            "## Heading with a period.\n"
+            "Retry policy uses exponential backoff [^ev-000001].\n"
+        )
+        _write_section(self.variants, "v-001", "01-retry", ["decided"], body)
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "pass")
+
+    def test_empty_body_passes(self):
+        _write_section(self.variants, "v-001", "01-empty", ["decided"], "")
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "pass")
+
+
 if __name__ == "__main__":
     unittest.main()

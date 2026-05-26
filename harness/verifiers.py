@@ -125,3 +125,48 @@ def _walk_sections(variants_nodes_root: Path):
                 tags = []
             rel_path = str(md.relative_to(variants_nodes_root.parent.parent))
             yield variant_dir.name, rel_path, tags, body
+
+
+# ----- Verifier A.1: citation completeness ------------------------------------
+
+
+_FENCED_CODE_RE = re.compile(r"```[^\n]*\n.*?\n```", re.DOTALL)
+_HEADING_LINE_RE = re.compile(r"^#{1,6}(\s.*)?$", re.MULTILINE)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?:\s+|\Z)")
+_CITE_RE = re.compile(r"\[\^ev-\d{6}\]")
+_LETTER_RE = re.compile(r"[A-Za-z]")
+
+
+def verify_citation_completeness(variants_nodes_root: Path) -> VerifierResult:
+    """Every assertion sentence in a `decided` section must have at least one
+    [^ev-NNNNNN] cite.
+    """
+    failures: list[VerifierFailure] = []
+    for variant, section_path, tags, body in _walk_sections(variants_nodes_root):
+        if "decided" not in tags:
+            continue
+        prose = _FENCED_CODE_RE.sub("", body)
+        prose = _HEADING_LINE_RE.sub("", prose)
+        for sentence in _SENTENCE_SPLIT_RE.split(prose):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            # Must end with sentence-final punctuation AND contain at least
+            # one letter (to skip pure-punctuation fragments).
+            if not sentence.endswith((".", "!", "?")):
+                continue
+            if not _LETTER_RE.search(sentence):
+                continue
+            if _CITE_RE.search(sentence):
+                continue
+            preview = sentence[:80].replace("\n", " ")
+            failures.append(VerifierFailure(
+                kind="uncited-claim",
+                variant=variant,
+                section_path=section_path,
+                detail=f"Sentence ends '{preview}' but has no [^ev-*] cite",
+            ))
+    return VerifierResult(
+        verdict="fail" if failures else "pass",
+        failures=failures,
+    )
