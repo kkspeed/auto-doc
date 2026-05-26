@@ -240,8 +240,6 @@ def verify_cite_resolution(
 
 import difflib
 
-_SENTENCE_BOUNDARY_BACK_RE = re.compile(r"[.!?]|\n\n")
-
 
 def _extract_sentence_containing(body: str, pos: int) -> str:
     """Return the sentence in `body` containing the character at offset `pos`.

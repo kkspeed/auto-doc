@@ -151,6 +151,7 @@ For each `[^ev-NNNNNN]` regex match in the body:
    - Scan forward from the cite's end position for the next `.`, `!`, `?`, or `\n\n` or end-of-body. The character at that boundary (inclusive of the punctuation) is the needle's end.
    - Strip leading/trailing whitespace.
    - If the needle is empty (rare edge case), fall back to the entire paragraph containing the cite.
+   - **Strip cite tokens from the needle before normalization** via `_CITE_RE.sub("", needle)`. Without this, the cite's normalized form (`ev-NNNNNN` — brackets and caret are stripped by `_normalize_text`'s per-word punctuation strip, but the slug body survives) contaminates the difflib comparison against the excerpt (which never contains the cite token) and drags ratios below the 0.92 threshold even for verbatim matches.
 
 2. Load the cited evidence file:
    - `ev_path = evidence_root / f"ev-{NNNNNN}.md"`.
@@ -180,7 +181,7 @@ Per parent design line 83 — six steps in this exact order:
    - `–` (en dash) → `-`
 3. `s = s.lower()`.
 4. `s = re.sub(r'\s+', ' ', s).strip()` — collapse any whitespace run (including newlines, tabs) to a single space; strip leading/trailing.
-5. Per-word leading/trailing punctuation strip: `' '.join(w.strip(string.punctuation) for w in s.split(' '))`.
+5. Per-word leading/trailing punctuation strip — strip `string.punctuation` MINUS `"` and `'`, so the ASCII quotes produced in step 2 from smart-quote inputs survive normalization. `' '.join(w.strip(_PUNCT_STRIP) for w in s.split(' '))` where `_PUNCT_STRIP = string.punctuation.translate(str.maketrans("", "", '"\''))`. Stripping quotes here would undo step 2.
 
 The function is pure (no I/O), deterministic, and idempotent (calling it twice yields the same result as calling it once).
 
