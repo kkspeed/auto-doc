@@ -18,6 +18,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -177,8 +178,10 @@ def validate_claim_position_not_alias(claim_dict, registry):
 
 
 def staged_files():
+    # Include A (added), M (modified), R (renamed), C (copied). Renamed files
+    # are the post-rename name; schema/citation checks must run on those too.
     out = subprocess.check_output(
-        ["git", "diff", "--cached", "--name-only", "--diff-filter=AM"]
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=AMRC"]
     ).decode()
     return [p for p in out.strip().split("\n") if p]
 
@@ -244,14 +247,26 @@ def cite_resolution_check(files=None):
                 f"cite [^ev-{ev_num}] does not resolve (no {ev_path})"
             )
             continue
-        text = ev_path.read_text()
-        # Check superseded_by in TOML frontmatter
+        text = ev_path.read_text(encoding="utf-8", errors="replace")
+        # Parse frontmatter as TOML to detect superseded_by in any valid TOML
+        # form (single/double quotes, multi-line, literal strings). Regex
+        # parsing of the single-line double-quoted form misses real evidence
+        # variants and would let superseded cites slip through.
         if text.startswith("+++"):
-            end = text.find("+++", 3)
-            if end != -1:
-                frontmatter = text[3:end]
-                if re.search(r'^\s*superseded_by\s*=\s*"[^"]+"', frontmatter,
-                             re.MULTILINE):
+            # Find closing +++ on its own line, not inside a string value
+            lines = text.split("\n")
+            end_line = None
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "+++":
+                    end_line = i
+                    break
+            if end_line is not None:
+                fm_text = "\n".join(lines[1:end_line])
+                try:
+                    meta = tomllib.loads(fm_text)
+                except tomllib.TOMLDecodeError:
+                    meta = None
+                if meta is not None and meta.get("superseded_by"):
                     errors.append(
                         f"cite [^ev-{ev_num}] refers to superseded evidence"
                     )

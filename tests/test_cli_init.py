@@ -97,6 +97,21 @@ class InitRefusesNonEmptyDirTest(unittest.TestCase):
         self.assertIn("refusing to clobber", result.stderr)
 
 
+class InitRefusesFileTargetTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.target = self.td / "ws-as-file"
+        self.target.write_text("I am a regular file, not a directory")
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_init_refuses_when_target_is_a_file(self):
+        result = _run_harness("init", str(self.target))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refusing to clobber existing file", result.stderr)
+
+
 class ReactivateTest(unittest.TestCase):
     def setUp(self):
         self.td = Path(tempfile.mkdtemp())

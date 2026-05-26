@@ -15,8 +15,12 @@ def cmd_init(target_dir: Path, reactivate: bool) -> int:
     if reactivate:
         return _reactivate(target_dir)
 
-    # Validate target: must not exist OR must be empty
+    # Validate target: must not exist, OR must be an empty directory.
     if target_dir.exists():
+        if not target_dir.is_dir():
+            print(f"harness init: refusing to clobber existing file {target_dir}",
+                  file=sys.stderr)
+            return 1
         if any(target_dir.iterdir()):
             print(f"harness init: refusing to clobber non-empty {target_dir}",
                   file=sys.stderr)
