@@ -347,7 +347,7 @@ A standalone executable Python script (~60 LOC) with `--scenario` flag:
 
 | Scenario | Behavior |
 |---|---|
-| `ok` | Read stdin, write `{"ok": true, "echo": "<sha256-of-stdin>"}` to stdout, exit 0 |
+| `ok` | Read stdin, write `{"ok": true, "echo_len": <N>, "echo_sha": "<sha256-prefix-16-chars>"}` to stdout, exit 0 (richer payload than a single field; downstream tests assert only on `ok`) |
 | `nonzero` | Write `"boom"` to stderr, exit 1 |
 | `nonjson` | Write `"not json output"` to stdout, exit 0 |
 | `slow N` | Write a heartbeat line to stderr every 100ms for N seconds, then `{"ok": true}` + exit 0 |
