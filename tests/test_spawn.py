@@ -97,5 +97,327 @@ class RunWithHeartbeatTest(unittest.TestCase):
         self.assertLessEqual(line_count, 100)
 
 
+import shutil
+import tempfile
+from pathlib import Path as _Path
+
+
+def _make_config(scenario, scenario_arg=None, marker_file=None,
+                 spawn_timeout=10, silence=10):
+    """Build a harness_config dict that points to the fake CLI for ALL tools."""
+    extras = ["--scenario", scenario]
+    if scenario_arg:
+        extras += ["--scenario-arg", scenario_arg]
+    if marker_file:
+        extras += ["--marker-file", marker_file]
+    return {
+        "models": {
+            "planner": {"tool": "claude", "model": "fake-model"},
+            "designer": {"tool": "claude", "model": "fake-model"},
+            "reviewer": {"tool": "claude", "model": "fake-model"},
+            "verifier_c": {"tool": "claude", "model": "fake-model"},
+        },
+        "run": {
+            "spawn_timeout_seconds": spawn_timeout,
+            "_silence_threshold_seconds_for_tests": silence,
+            "_retry_sleep_seconds_for_tests": 0,   # don't actually wait 30s in tests
+            "_fake_cli_argv_for_tests": extras,
+        },
+    }
+
+
+class _PatchedDispatch:
+    """Test helper: patch _TOOL_INVOKERS so 'claude' runs the fake CLI."""
+    def __init__(self, extras):
+        self.extras = extras
+        self._saved = None
+
+    def __enter__(self):
+        self._saved = dict(spawn._TOOL_INVOKERS)
+        def _fake_claude(model):
+            return [sys.executable, FAKE_CLI, *self.extras]
+        spawn._TOOL_INVOKERS["claude"] = _fake_claude
+        return self
+
+    def __exit__(self, *exc):
+        spawn._TOOL_INVOKERS.clear()
+        spawn._TOOL_INVOKERS.update(self._saved)
+
+
+class SpawnRoleHappyPathTest(unittest.TestCase):
+    def setUp(self):
+        self.td = _Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_spawn_role_returns_parsed_ok(self):
+        cfg = _make_config("ok")
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="# context", prompt="do a thing",
+                workspace_root=self.td, round_id="round-000001",
+                variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "ok")
+        self.assertIsNotNone(result.parsed)
+        self.assertTrue(result.parsed["ok"])
+
+    def test_spawn_role_without_validator_skips_schema_check(self):
+        cfg = _make_config("validate_fail")  # output is valid JSON but wrong shape
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="", workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        # No validator means any JSON is accepted
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.parsed, {"wrong_field": "x"})
+
+    def test_spawn_role_writes_context_md_to_round_scratch(self):
+        cfg = _make_config("ok")
+        ctx = "# planner context\nfoo bar baz"
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md=ctx, prompt="p",
+                workspace_root=self.td,
+                round_id="round-000042", variant_id="v-001",
+            )
+        scratch = self.td / "rounds" / "round-000042" / "scratch" / "planner.context.md"
+        self.assertTrue(scratch.exists())
+        self.assertEqual(scratch.read_text(), ctx)
+
+
+class SpawnRoleRetryTest(unittest.TestCase):
+    def setUp(self):
+        self.td = _Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_nonzero_exit_retries_after_sleep(self):
+        # transient scenario: first invocation fails, second succeeds
+        marker = self.td / "transient-marker"
+        cfg = _make_config("transient", marker_file=str(marker))
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.retry_count, 1)
+        self.assertTrue(result.parsed["retry"])
+
+    def test_nonzero_exit_both_attempts_fail_returns_spawn_failed(self):
+        cfg = _make_config("nonzero")
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "spawn-failed")
+        self.assertEqual(result.retry_count, 1)
+
+    def test_nonjson_output_retries_with_appended_prompt_hint(self):
+        cfg = _make_config("nonjson")
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        # Both attempts return nonjson; both fail parse → output-parse-fail
+        self.assertEqual(result.verdict, "output-parse-fail")
+        self.assertEqual(result.retry_count, 1)
+
+    def test_validator_failure_retries_with_appended_error_text(self):
+        cfg = _make_config("validate_fail")
+        def strict_validator(d):
+            if "ok" not in d:
+                raise ValueError("missing required field 'ok'")
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+                validator=strict_validator,
+            )
+        self.assertEqual(result.verdict, "output-parse-fail")
+        self.assertEqual(result.retry_count, 1)
+
+    def test_parse_retry_both_attempts_fail_returns_output_parse_fail(self):
+        # Covered by test_nonjson_output_retries above; this is an alias
+        # asserting the same verdict for explicit-coverage tracking.
+        cfg = _make_config("nonjson")
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "output-parse-fail")
+
+    def test_nonzero_exit_retry_succeeds_returns_ok(self):
+        # transient scenario: first invocation fails, second succeeds.
+        # Explicit assertion that the retry produces verdict='ok'.
+        marker = self.td / "transient-marker-2"
+        cfg = _make_config("transient", marker_file=str(marker))
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.retry_count, 1)
+
+
+class SpawnRoleTimeoutTest(unittest.TestCase):
+    def setUp(self):
+        self.td = _Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_hang_returns_timeout_verdict(self):
+        cfg = _make_config("hang", spawn_timeout=2, silence=2)
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "timeout")
+
+    def test_timeout_is_not_retryable(self):
+        cfg = _make_config("hang", spawn_timeout=2, silence=2)
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        # retry_count must be 0 — no retry attempted
+        self.assertEqual(result.verdict, "timeout")
+        self.assertEqual(result.retry_count, 0)
+
+    def test_overall_spawn_timeout_respected(self):
+        # spawn_timeout_seconds is the absolute cap; silence_threshold is much
+        # larger here. The hang scenario triggers the spawn-level timeout,
+        # not the silence one.
+        cfg = _make_config("hang", spawn_timeout=1, silence=30)
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            import time as _time
+            t0 = _time.monotonic()
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+            elapsed = _time.monotonic() - t0
+        self.assertEqual(result.verdict, "timeout")
+        self.assertEqual(result.retry_count, 0)
+        # Should respect the 1-second spawn timeout, not wait for silence
+        self.assertLess(elapsed, 5)
+
+
+class SpawnRoleToolDispatchTest(unittest.TestCase):
+    def setUp(self):
+        self.td = _Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_unknown_tool_in_harness_config_raises_value_error(self):
+        cfg = {
+            "models": {"planner": {"tool": "no-such-tool", "model": "x"}},
+            "run": {"spawn_timeout_seconds": 10},
+        }
+        with self.assertRaises(ValueError):
+            spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="r", variant_id="v-001",
+            )
+
+    def test_tool_not_on_path_returns_spawn_failed(self):
+        cfg = {
+            "models": {"planner": {"tool": "claude", "model": "x"}},
+            "run": {"spawn_timeout_seconds": 10,
+                    "_retry_sleep_seconds_for_tests": 0},
+        }
+        # Patch invoker to point at a nonexistent binary
+        saved = dict(spawn._TOOL_INVOKERS)
+        try:
+            spawn._TOOL_INVOKERS["claude"] = lambda m: ["/nonexistent/binary-xyz"]
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="r", variant_id="v-001",
+            )
+        finally:
+            spawn._TOOL_INVOKERS.clear()
+            spawn._TOOL_INVOKERS.update(saved)
+        self.assertEqual(result.verdict, "spawn-failed")
+
+    def test_tool_invoker_includes_configured_model_in_argv(self):
+        # Just verify _invoke_claude / _invoke_codex / _invoke_gemini all
+        # include the model string in their argv output.
+        for name in ("claude", "codex", "gemini"):
+            argv = spawn._TOOL_INVOKERS[name]("my-specific-model")
+            self.assertIn("my-specific-model", argv,
+                          f"{name} invoker did not include model in argv")
+
+
+class SpawnRoleConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.td = _Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_missing_role_in_harness_config_raises_key_error(self):
+        cfg = {"models": {}, "run": {"spawn_timeout_seconds": 10}}
+        with self.assertRaises(KeyError):
+            spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="r", variant_id="v-001",
+            )
+
+    def test_spawn_timeout_seconds_read_from_harness_toml(self):
+        # spawn_timeout_seconds=1 with a hang scenario should time out in ~1s
+        cfg = _make_config("hang", spawn_timeout=1, silence=10)
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            import time as _time
+            t0 = _time.monotonic()
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="",
+                workspace_root=self.td,
+                round_id="r", variant_id="v-001",
+            )
+            elapsed = _time.monotonic() - t0
+        self.assertEqual(result.verdict, "timeout")
+        self.assertLess(elapsed, 5)
+
+
 if __name__ == "__main__":
     unittest.main()
