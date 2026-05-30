@@ -85,7 +85,11 @@ def _run_with_heartbeat(
     def _write_stdin():
         try:
             if stdin_text:
-                proc.stdin.write(stdin_text.encode())
+                # errors="replace" prevents UnicodeEncodeError from killing the
+                # writer thread silently. Lossy encoding is the right trade-off
+                # vs producing a misleading "timeout" verdict — a few replaced
+                # characters are observable, a silent timeout is not.
+                proc.stdin.write(stdin_text.encode("utf-8", errors="replace"))
             proc.stdin.close()
         except (BrokenPipeError, OSError):
             pass
@@ -154,6 +158,12 @@ def _run_with_heartbeat(
     for t in threads:
         t.join(timeout=1)
 
+    # Snapshot the deque under the same lock the reader threads use, so that
+    # any still-running reader can't be mid-append while we iterate.
+    with lock:
+        stderr_snapshot = list(stderr_lines)
+        stdout_snapshot = bytes(stdout_buf)
+
     # Close pipes explicitly to avoid ResourceWarning on killed processes
     for pipe in (proc.stdout, proc.stderr, proc.stdin):
         try:
@@ -165,8 +175,8 @@ def _run_with_heartbeat(
     elapsed = time.monotonic() - spawn_start
     return _RunResult(
         returncode=proc.returncode if proc.returncode is not None else -1,
-        stdout=bytes(stdout_buf),
-        stderr_tail="\n".join(stderr_lines),
+        stdout=stdout_snapshot,
+        stderr_tail="\n".join(stderr_snapshot),
         elapsed_seconds=elapsed,
         verdict=verdict,
     )

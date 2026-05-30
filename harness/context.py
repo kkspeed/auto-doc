@@ -37,7 +37,8 @@ def _now_iso() -> str:
 def _load_decisions(workspace_root: Path) -> dict:
     """Return {decision_id: {"id", "question", "status", "introduced_at"}}.
 
-    Returns an empty dict if derived/decisions.json is missing or malformed.
+    Returns an empty dict if derived/decisions.json is missing, malformed,
+    or has a non-dict 'decisions' payload (defensive against upstream bugs).
     """
     p = workspace_root / "derived" / "decisions.json"
     if not p.exists():
@@ -46,7 +47,8 @@ def _load_decisions(workspace_root: Path) -> dict:
         data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
     except json.JSONDecodeError:
         return {}
-    return data.get("decisions", {})
+    decisions = data.get("decisions", {})
+    return decisions if isinstance(decisions, dict) else {}
 
 
 def _load_goal_version(workspace_root: Path) -> str:
@@ -231,7 +233,12 @@ def build_designer_context(workspace_root: Path, round_id: str,
     pending = []
     for c in claims:
         pd = c.get("proposed_decision")
-        if pd and pd.get("id") not in decisions:
+        if not pd:
+            continue
+        pd_id = pd.get("id")
+        if not isinstance(pd_id, str) or not pd_id:
+            continue   # skip malformed proposals (no usable id)
+        if pd_id not in decisions:
             pending.append(pd)
     if pending:
         out.append("| Proposed decision ID | Question | Rationale |")
@@ -316,17 +323,16 @@ def build_reviewer_context(workspace_root: Path, round_id: str,
         workspace_root / "rounds" / round_id / "scratch" / "designer.json"
     )
     pending: list[dict] = []
-    if designer_json.exists():
-        try:
-            data = json.loads(designer_json.read_text(
-                encoding="utf-8", errors="replace"
-            ))
-            for c in data.get("claims", []):
-                pd = c.get("proposed_decision")
-                if pd:
-                    pending.append(pd)
-        except json.JSONDecodeError:
-            pass
+    try:
+        data = json.loads(designer_json.read_text(
+            encoding="utf-8", errors="replace"
+        ))
+        for c in data.get("claims", []):
+            pd = c.get("proposed_decision")
+            if pd:
+                pending.append(pd)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
     if pending:
         out.append("| Proposed decision ID | Question | Rationale |")
         out.append("|---|---|---|")
@@ -348,10 +354,10 @@ def build_reviewer_context(workspace_root: Path, round_id: str,
     out.append("")
 
     # Registry posture
-    threshold = (
-        harness_cfg.get("claim_graph", {})
-        .get("bootstrap_registry_size_threshold", 5)
-    )
+    claim_graph_cfg = harness_cfg.get("claim_graph", {})
+    if not isinstance(claim_graph_cfg, dict):
+        claim_graph_cfg = {}
+    threshold = claim_graph_cfg.get("bootstrap_registry_size_threshold", 5)
     # Count only non-retired decisions for the bootstrap-permissive threshold.
     # Retired decisions don't affect what's actively in play, so they
     # shouldn't push the reviewer out of the bootstrap-permissive posture.
