@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from harness import bootstrap
+
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_DIR = HARNESS_ROOT / "workspace_template"
 
@@ -54,7 +56,17 @@ def cmd_init(target_dir: Path, reactivate: bool) -> int:
             ["git", "config", "core.hooksPath", "hooks/"],
             cwd=target_dir,
         )
+        # Bootstrap derived state before the scaffold commit:
+        #  - decisions.json: rebuildable cache (gitignored; not committed)
+        #  - canonical_slug_registry.json: persisted append-only baseline
+        bootstrap.rebuild_decisions_cache(target_dir)
+        bootstrap.ensure_empty_registry(target_dir)
         subprocess.check_call(["git", "add", "."], cwd=target_dir)
+        # Force-add the registry (derived/ is gitignored) so its baseline is
+        # tracked. decisions.json stays ignored — it is rebuilt each run.
+        subprocess.check_call(
+            ["git", "-C", str(target_dir), "add", "-f",
+             "derived/canonical_slug_registry.json"])
         subprocess.check_call(
             ["git",
              "-c", "user.email=harness@localhost",

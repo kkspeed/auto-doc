@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -151,6 +152,33 @@ class ReactivateTest(unittest.TestCase):
         result = _run_harness("init", str(self.target), "--reactivate")
         self.assertEqual(result.returncode, 1)
         self.assertIn("not a git repository", result.stderr)
+
+
+class InitBootstrapsDerivedTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _init(self):
+        result = _run_harness("init", str(self.ws))
+        self.assertEqual(result.returncode, 0,
+                         f"stderr: {result.stderr}")
+
+    def test_decisions_cache_has_seed_decisions(self):
+        self._init()
+        data = json.loads(
+            (self.ws / "derived" / "decisions.json").read_text())
+        self.assertIn("retry-policy", data["decisions"])
+
+    def test_registry_baseline_committed(self):
+        self._init()
+        tracked = subprocess.check_output(
+            ["git", "-C", str(self.ws), "ls-files",
+             "derived/canonical_slug_registry.json"]).decode().strip()
+        self.assertEqual(tracked, "derived/canonical_slug_registry.json")
 
 
 if __name__ == "__main__":
