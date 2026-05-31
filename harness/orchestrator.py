@@ -27,6 +27,23 @@ from harness.round_ledger import _ALLOWED_REASONS
 from harness.spawn import RoleOutput, spawn_role
 
 
+_ID_RE = re.compile(r"^(cl|ev|at)-\d{6}$")
+
+
+def _toml_basic_str_escape(s: str) -> str:
+    """Escape a string for safe inclusion in a TOML double-quoted basic string.
+
+    Per TOML spec, basic strings escape: backslash, double-quote, and
+    control characters (\\b, \\t, \\n, \\f, \\r). Other characters appear
+    literally.
+    """
+    s = s.replace("\\", "\\\\")
+    s = s.replace('"', '\\"')
+    s = s.replace("\b", "\\b").replace("\t", "\\t").replace("\n", "\\n")
+    s = s.replace("\f", "\\f").replace("\r", "\\r")
+    return s
+
+
 # ----- Dataclasses ----------------------------------------------------------
 
 
@@ -159,17 +176,19 @@ def _materialize_designer_output(
     evidence_dir.mkdir(parents=True, exist_ok=True)
     for ev in parsed.get("evidence", []) or []:
         ev_id = ev.get("id", "")
-        if not ev_id:
-            continue
-        # Build TOML frontmatter from the evidence dict.
+        if not ev_id or not _ID_RE.match(ev_id):
+            continue   # skip malformed/unsafe ids (path traversal guard)
+        # Build TOML frontmatter using basic strings with proper escapes.
+        # Triple-quoted strings can't be safely escaped if the content
+        # contains literal `"""`, so we use single-line basic strings
+        # with newlines escaped as \\n.
         fm_lines = []
         for key in ("id", "confidence", "claim", "excerpt", "match"):
             val = ev.get(key)
             if val is None:
                 continue
-            # Use triple-quoted string for multi-line safety
-            escaped = str(val).replace('"""', '\\"\\"\\"')
-            fm_lines.append(f'{key} = """{escaped}"""')
+            escaped = _toml_basic_str_escape(str(val))
+            fm_lines.append(f'{key} = "{escaped}"')
         text = "+++\n" + "\n".join(fm_lines) + "\n+++\n\n" + \
                str(ev.get("excerpt", "")) + "\n"
         ev_path = evidence_dir / f"{ev_id}.md"
@@ -182,8 +201,8 @@ def _materialize_designer_output(
     claims_dir.mkdir(parents=True, exist_ok=True)
     for claim in parsed.get("claims", []) or []:
         cl_id = claim.get("id", "")
-        if not cl_id:
-            continue
+        if not cl_id or not _ID_RE.match(cl_id):
+            continue   # skip malformed/unsafe ids (path traversal guard)
         cl_path = claims_dir / f"{cl_id}.json"
         cl_path.write_text(json.dumps(claim, indent=2, sort_keys=True))
         materialized.append(cl_path)
@@ -234,8 +253,8 @@ def _materialize_reviewer_attacks(
     attack_paths: list[str] = []
     for at in parsed.get("attacks", []) or []:
         at_id = at.get("id", "")
-        if not at_id:
-            continue
+        if not at_id or not _ID_RE.match(at_id):
+            continue   # skip malformed/unsafe ids (path traversal guard)
         attacks_dir.mkdir(parents=True, exist_ok=True)
         at_path = attacks_dir / f"{at_id}.json"
         at_path.write_text(json.dumps(at, indent=2, sort_keys=True))
@@ -297,6 +316,12 @@ def run_round(
     def _reject(action: str, reason_class: str, failed_phase: str,
                 detail: str, reviewer_id: str | None = None) -> RoundOutcome:
         _discard_materialized(workspace_root, materialized)
+        # Map verdicts that aren't in the commit-msg hook's ALLOWED_ACTIONS
+        # to their natural sibling. "timeout" comes from spawn_role's
+        # heartbeat trip; semantically it's a spawn-level failure, so we
+        # commit it as spawn-failed. The rj-*.md frontmatter preserves the
+        # original verdict for audit.
+        commit_action = "spawn-failed" if action == "timeout" else action
         rj_id = round_ledger.write_rejection(
             workspace_root, round_id, variant_id,
             reason_class=reason_class, failed_phase=failed_phase,
@@ -306,7 +331,7 @@ def run_round(
              round_id=round_id, rj_id=rj_id,
              reason_class=reason_class, failed_phase=failed_phase)
         round_ledger.commit_rejection(
-            workspace_root, action=action,
+            workspace_root, action=commit_action,
             round_id=round_id, variant_id=variant_id,
             rj_id=rj_id, reason=reason_class, reviewer_id=reviewer_id,
         )
@@ -510,6 +535,7 @@ def run_round(
     else:
         existing_ids = set()
     proposed_payloads = []
+    seen_in_round: set[str] = set()
     for c in designer_result.parsed.get("claims", []) or []:
         pd = c.get("proposed_decision")
         if not (pd and isinstance(pd, dict)):
@@ -519,6 +545,9 @@ def run_round(
             continue   # malformed proposal — silently skip per validator scope
         if pd_id in existing_ids:
             continue   # already registered — don't re-propose
+        if pd_id in seen_in_round:
+            continue   # duplicate within this round — keep the first
+        seen_in_round.add(pd_id)
         proposed_payloads.append(pd)
     approved_proposals: list[dict] = []
     if proposed_payloads:
