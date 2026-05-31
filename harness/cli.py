@@ -85,6 +85,51 @@ def _reactivate(target_dir: Path) -> int:
     return 0
 
 
+def cmd_run(
+    workspace: Path,
+    max_rounds: int | None,
+    max_hours: float | None,
+    variants: int,
+) -> int:
+    """Run the harness loop. Requires at least one of max_rounds / max_hours."""
+    import tomllib
+    from harness.orchestrator import run_loop
+
+    if max_rounds is None and max_hours is None:
+        print("harness run: at least one of --rounds or --hours required",
+              file=sys.stderr)
+        return 2
+
+    harness_toml = workspace / "harness.toml"
+    if not harness_toml.exists():
+        print(f"harness run: {harness_toml} not found "
+              "(workspace not scaffolded?)", file=sys.stderr)
+        return 1
+    with harness_toml.open("rb") as f:
+        harness_config = tomllib.load(f)
+
+    try:
+        outcomes = run_loop(
+            workspace, harness_config,
+            max_rounds=max_rounds,
+            max_wall_clock_hours=max_hours,
+            variant_count=variants,
+        )
+    except ValueError as e:
+        print(f"harness run: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:
+        print(f"harness run: unexpected error: {e}", file=sys.stderr)
+        return 1
+
+    # Summary
+    for o in outcomes:
+        print(f"{o.round_id} {o.variant_id} → {o.verdict}"
+              f"{' (' + o.reason + ')' if o.reason else ''}")
+    print(f"Ran {len(outcomes)} round(s).")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="harness",
@@ -100,9 +145,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Re-run hook configuration on an existing workspace (e.g., a clone)",
     )
 
+    run_p = subparsers.add_parser("run", help="Run the harness loop")
+    run_p.add_argument("--rounds", type=int, default=None,
+                       help="Max rounds cap (at least one of "
+                            "--rounds / --hours required)")
+    run_p.add_argument("--hours", type=float, default=None,
+                       help="Max wall-clock hours cap")
+    run_p.add_argument("--variants", type=int, default=2,
+                       help="Number of variants to rotate across (default 2)")
+    run_p.add_argument("--workspace", type=Path, default=Path.cwd(),
+                       help="Workspace directory (default: cwd)")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         return cmd_init(args.dir, args.reactivate)
+    if args.cmd == "run":
+        return cmd_run(args.workspace, args.rounds, args.hours, args.variants)
     return 1
 
 
