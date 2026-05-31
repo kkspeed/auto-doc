@@ -7,7 +7,6 @@ from pathlib import Path
 
 from harness import bootstrap
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 GOAL_TOML = """\
 [goal]
 title = "T"
@@ -54,6 +53,19 @@ class RebuildDecisionsCacheTest(unittest.TestCase):
 
     def test_missing_goal_toml_writes_empty(self):
         (self.td / "goal.toml").unlink()
+        bootstrap.rebuild_decisions_cache(self.td)
+        data = json.loads((self.td / "derived" / "decisions.json").read_text())
+        self.assertEqual(data["decisions"], {})
+
+    def test_malformed_toml_writes_empty(self):
+        (self.td / "goal.toml").write_text("[[invalid")
+        bootstrap.rebuild_decisions_cache(self.td)
+        data = json.loads((self.td / "derived" / "decisions.json").read_text())
+        self.assertEqual(data["decisions"], {})
+
+    def test_non_string_id_skipped(self):
+        (self.td / "goal.toml").write_text(
+            '[[decision]]\nid = 42\nquestion = "q"\nstatus = "open"\n')
         bootstrap.rebuild_decisions_cache(self.td)
         data = json.loads((self.td / "derived" / "decisions.json").read_text())
         self.assertEqual(data["decisions"], {})
@@ -105,3 +117,11 @@ class AssertCleanWorktreeTest(unittest.TestCase):
         (self.td / "a.txt").write_text("changed")
         with self.assertRaises(bootstrap.DirtyWorktreeError):
             bootstrap.assert_clean_worktree(self.td)
+
+    def test_non_git_dir_raises(self):
+        # A directory outside any git repo: git status must fail, and the
+        # guard must fail-closed (NOT treat an undeterminable tree as clean).
+        nongit = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, nongit, ignore_errors=True)
+        with self.assertRaises(bootstrap.DirtyWorktreeError):
+            bootstrap.assert_clean_worktree(nongit)
