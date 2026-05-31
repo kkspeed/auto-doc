@@ -170,6 +170,7 @@ class GateTest(unittest.TestCase):
         passed, detail = scorecard.evaluate_gate(self.BASE, new, 0.05)
         self.assertFalse(passed)
         self.assertIn("coherence", detail)
+        self.assertIn("0.50->0.40", detail)
 
     def test_regression_within_tolerance_with_improvement_passes(self):
         new = dict(self.BASE, completeness=0.7, coherence=0.46)  # -0.04 ok
@@ -203,6 +204,11 @@ class LoadBuildWriteTest(unittest.TestCase):
 
     def test_load_missing_returns_none(self):
         self.assertIsNone(scorecard.load_scorecard(self.td / "nope.json"))
+
+    def test_load_corrupt_json_returns_none(self):
+        path = self.td / "bad.json"
+        path.write_text("not json {{{")
+        self.assertIsNone(scorecard.load_scorecard(path))
 
     def test_build_write_load_roundtrip(self):
         dims = {d: 0.5 for d in scorecard.DIMENSIONS}

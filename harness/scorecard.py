@@ -217,6 +217,7 @@ def format_score_delta(prior_dimensions: dict, new_dimensions: dict) -> str:
 
 
 def build_scorecard(variant_id: str, round_id: str, dimensions: dict) -> dict:
+    """Assemble a scorecard dict for JSON serialization."""
     return {
         "variant": variant_id,
         "round": round_id,
@@ -229,8 +230,10 @@ def load_scorecard(scorecard_path: Path) -> dict | None:
         return None
     try:
         return json.loads(scorecard_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
+    except json.JSONDecodeError:
+        return None  # malformed JSON -> treat as no prior baseline
+    # OSError (unreadable existing file) intentionally propagates: a corrupt
+    # scorecard must not silently disable the gate and overwrite the baseline.
 
 
 def write_scorecard(scorecard_path: Path, scorecard: dict) -> None:
