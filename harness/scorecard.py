@@ -144,3 +144,96 @@ def compute_technical_correctness(
     if vc_confirm_rate is None:
         return reviewer_score
     return reviewer_score * vc_confirm_rate
+
+
+# ----- Aggregate + gate ------------------------------------------------------
+
+
+def compute_dimensions(
+    *,
+    variant_claims_dir: Path,
+    variant_doc_dir: Path,
+    evidence_root: Path,
+    decisions: list[dict],
+    round_actions: list[dict],
+    reviewer_goal_alignment: float,
+    reviewer_technical_correctness: float,
+    vc_per_claim: list[dict],
+) -> dict:
+    """Compute all six dimensions. Returns {dim: float} keyed by DIMENSIONS."""
+    vc_rate = compute_vc_confirm_rate(vc_per_claim)
+    return {
+        "groundedness": compute_groundedness(variant_claims_dir, evidence_root),
+        "goal_alignment": reviewer_goal_alignment,
+        "technical_correctness": compute_technical_correctness(
+            reviewer_technical_correctness, vc_rate),
+        "completeness": compute_completeness(decisions, variant_doc_dir),
+        "coherence": compute_coherence(variant_doc_dir, evidence_root),
+        "constitution_compliance": compute_constitution_compliance(
+            round_actions),
+    }
+
+
+def evaluate_gate(
+    prior_dimensions: dict | None,
+    new_dimensions: dict,
+    tolerance: float,
+) -> tuple[bool, str]:
+    """Merge gate (delta tolerance). Returns (passed, detail).
+
+    Bootstrap (no prior) always passes. Otherwise: pass iff at least one shared
+    dimension strictly improved AND no shared dimension dropped more than
+    `tolerance` below its prior value.
+    """
+    if prior_dimensions is None:
+        return True, "bootstrap"
+    shared = [d for d in new_dimensions if d in prior_dimensions]
+    improved = any(new_dimensions[d] > prior_dimensions[d] for d in shared)
+    regressions = [
+        d for d in shared
+        if new_dimensions[d] < prior_dimensions[d] - tolerance
+    ]
+    if regressions:
+        worst = ", ".join(
+            f"{d}: {prior_dimensions[d]:.2f}->{new_dimensions[d]:.2f}"
+            for d in regressions
+        )
+        return False, f"regressed beyond tolerance: {worst}"
+    if not improved:
+        return False, "no dimension improved"
+    return True, "ok"
+
+
+def format_score_delta(prior_dimensions: dict, new_dimensions: dict) -> str:
+    """Signed two-decimal per-dimension delta, in DIMENSIONS order."""
+    parts = []
+    for d in DIMENSIONS:
+        delta = new_dimensions.get(d, 0.0) - prior_dimensions.get(d, 0.0)
+        parts.append(f"{d}={delta:+.2f}")
+    return " ".join(parts)
+
+
+# ----- scorecard.json I/O ----------------------------------------------------
+
+
+def build_scorecard(variant_id: str, round_id: str, dimensions: dict) -> dict:
+    return {
+        "variant": variant_id,
+        "round": round_id,
+        "dimensions": dimensions,
+    }
+
+
+def load_scorecard(scorecard_path: Path) -> dict | None:
+    if not scorecard_path.exists():
+        return None
+    try:
+        return json.loads(scorecard_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def write_scorecard(scorecard_path: Path, scorecard: dict) -> None:
+    scorecard_path.parent.mkdir(parents=True, exist_ok=True)
+    scorecard_path.write_text(
+        json.dumps(scorecard, indent=2, sort_keys=True))

@@ -144,3 +144,72 @@ class TechnicalCorrectnessTest(unittest.TestCase):
                      {"verdict": "weak"}]
         self.assertAlmostEqual(
             scorecard.compute_vc_confirm_rate(per_claim), 2 / 3)
+
+
+class GateTest(unittest.TestCase):
+    BASE = {d: 0.5 for d in scorecard.DIMENSIONS}
+
+    def test_bootstrap_none_prior_passes(self):
+        passed, detail = scorecard.evaluate_gate(None, self.BASE, 0.05)
+        self.assertTrue(passed)
+        self.assertEqual(detail, "bootstrap")
+
+    def test_improvement_passes(self):
+        new = dict(self.BASE, completeness=0.6)
+        passed, _ = scorecard.evaluate_gate(self.BASE, new, 0.05)
+        self.assertTrue(passed)
+
+    def test_no_improvement_fails(self):
+        passed, detail = scorecard.evaluate_gate(self.BASE, dict(self.BASE),
+                                                 0.05)
+        self.assertFalse(passed)
+        self.assertIn("no dimension improved", detail)
+
+    def test_regression_beyond_tolerance_fails(self):
+        new = dict(self.BASE, completeness=0.7, coherence=0.4)  # -0.1 < -0.05
+        passed, detail = scorecard.evaluate_gate(self.BASE, new, 0.05)
+        self.assertFalse(passed)
+        self.assertIn("coherence", detail)
+
+    def test_regression_within_tolerance_with_improvement_passes(self):
+        new = dict(self.BASE, completeness=0.7, coherence=0.46)  # -0.04 ok
+        passed, _ = scorecard.evaluate_gate(self.BASE, new, 0.05)
+        self.assertTrue(passed)
+
+    def test_drop_of_exactly_tolerance_passes(self):
+        new = dict(self.BASE, completeness=0.7, coherence=0.45)  # -0.05 exactly
+        passed, _ = scorecard.evaluate_gate(self.BASE, new, 0.05)
+        self.assertTrue(passed)
+
+
+class FormatScoreDeltaTest(unittest.TestCase):
+    def test_signed_two_decimals_in_dimension_order(self):
+        prior = {d: 0.50 for d in scorecard.DIMENSIONS}
+        new = dict(prior, groundedness=0.54, technical_correctness=0.48)
+        s = scorecard.format_score_delta(prior, new)
+        self.assertTrue(s.startswith("groundedness=+0.04 "))
+        self.assertIn("technical_correctness=-0.02", s)
+        self.assertIn("goal_alignment=+0.00", s)
+        # All six dims present, space-separated.
+        self.assertEqual(len(s.split()), len(scorecard.DIMENSIONS))
+
+
+class LoadBuildWriteTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_load_missing_returns_none(self):
+        self.assertIsNone(scorecard.load_scorecard(self.td / "nope.json"))
+
+    def test_build_write_load_roundtrip(self):
+        dims = {d: 0.5 for d in scorecard.DIMENSIONS}
+        card = scorecard.build_scorecard("v-001", "round-000002", dims)
+        path = self.td / "scorecard.json"
+        scorecard.write_scorecard(path, card)
+        loaded = scorecard.load_scorecard(path)
+        self.assertEqual(loaded["variant"], "v-001")
+        self.assertEqual(loaded["round"], "round-000002")
+        self.assertEqual(loaded["dimensions"], dims)
