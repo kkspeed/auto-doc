@@ -55,6 +55,12 @@ class GroundednessTest(unittest.TestCase):
         self.assertEqual(
             scorecard.compute_groundedness(self.claims, self.ev), 0.5)
 
+    def test_single_claim_with_one_dangling_id_is_ungrounded(self):
+        _write_evidence(self.ev, "ev-000001")
+        _write_claim(self.claims, "cl-000001", ["ev-000001", "ev-999999"])
+        self.assertEqual(
+            scorecard.compute_groundedness(self.claims, self.ev), 0.0)
+
     def test_superseded_evidence_counts_as_ungrounded(self):
         _write_evidence(self.ev, "ev-000001", superseded_by="ev-000002")
         _write_claim(self.claims, "cl-000001", ["ev-000001"])

@@ -31,6 +31,8 @@ _SECTION_ID_RE = re.compile(
 # ----- Evidence resolution ---------------------------------------------------
 
 
+# NOTE: intentionally mirrors verifiers._load_evidence_frontmatter + the
+# superseded_by check; duplicated (not imported) to keep scorecard.py pure.
 def _evidence_resolves_ok(evidence_root: Path, ev_id: str) -> bool:
     """True iff evidence/<ev_id>.md exists, parses, and is not superseded."""
     ev_path = evidence_root / f"{ev_id}.md"
