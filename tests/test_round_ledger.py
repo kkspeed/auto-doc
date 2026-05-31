@@ -269,5 +269,46 @@ class CommitMergeScoreDeltaTest(unittest.TestCase):
         self.assertEqual(tracked, "variants/nodes/v-001/scorecard.json")
 
 
+class CommitStderrCaptureTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_failed_commit_raises_with_stderr(self):
+        # Commit with no staged changes fails; stderr must be captured on the
+        # raised CalledProcessError (not sent to the terminal).
+        with self.assertRaises(subprocess.CalledProcessError) as ctx:
+            round_ledger._git_commit(self.ws, "subject\n\nAction: init\n")
+        self.assertIsNotNone(ctx.exception.stderr)
+
+
+class CommitRegistrySyncTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_registry_sync_commit(self):
+        reg = self.ws / "derived" / "canonical_slug_registry.json"
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        reg.write_text('{"retry-policy": {"canonical": ["expo"], "aliases": {}}}')
+        (self.ws / "actions.jsonl").touch()
+        round_ledger.commit_registry_sync(self.ws)
+        msg = subprocess.check_output(
+            ["git", "-C", str(self.ws), "log", "-1", "--format=%B"]).decode()
+        self.assertIn("Action: registry-sync", msg)
+        tracked = subprocess.check_output(
+            ["git", "-C", str(self.ws), "ls-files",
+             "derived/canonical_slug_registry.json"]).decode().strip()
+        self.assertEqual(tracked, "derived/canonical_slug_registry.json")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ Public API:
                  claim_paths, attack_paths, evidence_paths) -> None
   - commit_rejection(workspace_root, action, round_id, variant_id, rj_id,
                      reason, reviewer_id=None) -> None
+  - commit_registry_sync(workspace_root) -> None
 """
 from __future__ import annotations
 
@@ -101,22 +102,23 @@ def append_actions_log(workspace_root: Path, entry: dict) -> None:
 
 
 def _git_commit(workspace_root: Path, message: str) -> None:
-    """Run git commit with the given message. Uses a baked-in harness identity
-    so the call works on machines without a global user.name/user.email."""
-    subprocess.check_call(
+    """Run git commit; capture stderr so callers can record it on failure."""
+    subprocess.run(
         ["git",
          "-c", "user.email=harness@localhost",
          "-c", "user.name=harness",
          "commit", "-q", "-m", message],
         cwd=workspace_root,
+        capture_output=True, text=True, check=True,
     )
 
 
 def _git_add(workspace_root: Path, *paths: str) -> None:
     if not paths:
         return
-    subprocess.check_call(
+    subprocess.run(
         ["git", "-C", str(workspace_root), "add", "-f", *paths],
+        capture_output=True, text=True, check=True,
     )
 
 
@@ -197,7 +199,7 @@ _ALLOWED_REASONS = frozenset({
     "uncited-claim", "cross-field-fail", "vacuous-position",
     "proposal-rejected", "scope-violation", "immutability-violation",
     "phantom-claim", "dangling-evidence", "silent-goal-toml-edit",
-    "score-regression",
+    "score-regression", "hook-rejected",
 })
 
 
@@ -232,4 +234,18 @@ def commit_rejection(
     if reviewer_id is not None:
         lines.append(f"Reviewer: {reviewer_id}")
     message = "\n".join(lines) + "\n"
+    _git_commit(workspace_root, message)
+
+
+def commit_registry_sync(workspace_root: Path) -> None:
+    """Stage derived/canonical_slug_registry.json + actions.jsonl (force-add,
+    since derived/ is gitignored) and commit with Action: registry-sync."""
+    _git_add(
+        workspace_root,
+        "derived/canonical_slug_registry.json", "actions.jsonl",
+    )
+    message = (
+        "feat(harness): sync canonical slug registry\n\n"
+        "Action: registry-sync\n"
+    )
     _git_commit(workspace_root, message)
