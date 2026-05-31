@@ -32,7 +32,7 @@ Out of scope (recorded / deferred): #6 detector→brief wiring (TODOS #6), #7 sc
 
 | File | Responsibility | Create/Modify |
 |---|---|---|
-| `harness/bootstrap.py` | `rebuild_decisions_cache`, `seed_variant_docs`, `ensure_empty_registry`. Pure-ish (filesystem only). | Create |
+| `harness/bootstrap.py` | `rebuild_decisions_cache`, `seed_variant_docs`, `ensure_empty_registry`, `assert_clean_worktree`. Pure-ish (filesystem + `git status`). | Create |
 | `harness/cli.py` | `cmd_init` calls bootstrap (decisions cache + empty registry). | Modify |
 | `harness/orchestrator.py` | `run_loop` seeds variants + rebuilds cache at start; `run_round` captures `round_start_sha`, wraps commits with reset-on-failure, materializes `patch.diff`, maintains the registry, fails loud. | Modify |
 | `harness/context.py` | Add "Read these first (on disk)" pointer sections + inline goal title/description to all three builders. | Modify |
@@ -50,6 +50,12 @@ Read `goal.toml`'s `[[decision]]` array; write `derived/decisions.json` as `{"de
 ### 3.2 `ensure_empty_registry(workspace_root) -> None`
 If `derived/canonical_slug_registry.json` is absent, write an empty `CanonicalSlugRegistry().to_dict()`. Called from `cmd_init`, which then force-commits it (Action: init) so the persisted append-only state has a baseline. (The registry is *not* rebuilt — see D5.)
 
+**Force-add inventory (D5).** `derived/` is gitignored, but the canonical registry is persisted state, so *every* commit path that stages it must use `git add -f`. The complete set of paths that force-add `derived/canonical_slug_registry.json`:
+- `cmd_init` baseline commit (Action: init) — new in this sub-project.
+- `round_ledger.commit_canonicalize` (Action: canonicalize) — already uses `add -f`.
+- the new §6 `registry-sync` commit (Action: registry-sync) — must use `add -f`.
+`derived/decisions.json` is *not* force-committed (it is a rebuildable cache read from the working tree); the existing `commit_register_decision` force-adds it only as a convenience and that remains harmless. The plan must verify each of these call sites uses `-f`.
+
 ### 3.3 `seed_variant_docs(workspace_root, variant_count) -> list[str]`
 For each `v-001..v-{variant_count:03d}` whose `variants/nodes/{v}/doc/` has no `*.md`, write `seed_doc.md`'s body into `doc/00-overview.md` with frontmatter `section_id = "overview"`, `created_round`, `tags = []`. Returns the relative paths created. Called once at `run_loop` start; the created files are committed in a single `Action: init` commit (the init whitelist is unrestricted). If `seed_doc.md` is missing, no-op (a workspace may legitimately start empty).
 
@@ -58,11 +64,14 @@ For each `v-001..v-{variant_count:03d}` whose `variants/nodes/{v}/doc/` has no `
 ### 4.1 CONTEXT.md additions
 Each builder gains a `## Read these first (on disk)` section listing ordered, workspace-relative paths, plus inlined goal title + description (small, high-value). The agent uses its own file tools to read them.
 
-- **Designer** (`build_designer_context`): `goal.toml`; `variants/nodes/{v}/doc/` (current sections); each `target_sections` path from `rounds/{round}/scratch/planner.json`; `evidence/` (or `evidence/INDEX.md` if present); `rounds/{round}/plan.md`.
+- **Designer** (`build_designer_context`): `goal.toml`; `variants/nodes/{v}/doc/` (current sections); each `target_sections` path from the planner output; `rounds/{round}/scratch/planner.json` (the planner's actual output file — there is **no** `plan.md`; the earlier pointer to `plan.md` was wrong because the planner writes `planner.json`); `evidence/` (or `evidence/INDEX.md` if present).
 - **Reviewer** (`build_reviewer_context`): `rounds/{round}/patch.diff`; the evidence files cited by this round's claims; `variants/nodes/{v}/doc/`.
 - **Verifier C** (`build_verifier_c_context`): `rounds/{round}/patch.diff`; the evidence files cited by this round's claims (listed explicitly by path). This is the material its prompt already assumes.
 
 Existing inline tables (registered decisions, positions, proposals, posture) are retained — they synthesize cross-file state cheaply.
+
+### 4.1a Prompts must compel reading (pointers are necessary but not sufficient)
+Pointers only help if the agent actually opens them. `DESIGNER_PROMPT`, `REVIEWER_PROMPT`, and `VERIFIER_C_PROMPT` each gain an explicit instruction: *"Before answering, read every path listed under 'Read these first (on disk)' in the CONTEXT above; do not rely on the summary tables alone."* Tests assert both that the prompt carries this instruction and that the generated CONTEXT.md contains the expected pointer paths for the role.
 
 ### 4.2 `rounds/{round}/patch.diff`
 `_materialize_designer_output` writes the designer's `patch_diff` string to `rounds/{round}/patch.diff` so Reviewer/Verifier-C have a stable on-disk pointer. (Today the patch lives only inside `scratch/designer.json`.) Path is under `rounds/{round}/` which the access intent already grants those roles.
@@ -72,17 +81,28 @@ Thread `cwd=workspace_root` from `spawn_role` through `_run_with_heartbeat` into
 
 ## 5. Commit failure → rejection (#3, D4)
 
+### 5.0 Clean-worktree guard (D4 safety rail — addresses the data-loss risk)
+**`git reset --hard` must never run against a worktree that could hold un-committed user edits.** Two rails make the reset safe:
+- **`assert_clean_worktree(workspace_root)`** runs **first at `run_loop` start** — before any bootstrap mutation — so a workspace left dirty by a prior crashed run is caught up front, and again at the top of every `run_round`. It runs `git status --porcelain`; if the worktree is dirty (any modified/staged/untracked non-ignored path), the harness **aborts the run with a clear error** ("workspace has uncommitted changes — commit or discard before running") rather than proceeding. It does **not** auto-stash or auto-discard. Bootstrap's `rebuild_decisions_cache` writes only the gitignored `derived/` cache (invisible to `git status --porcelain`), and `seed_variant_docs` commits its doc files immediately, so the tree is still clean when the first `run_round` asserts. This guarantees that at a round's start `round_start_sha == HEAD == clean working tree`, so the §5.2 reset only ever erases files *this round* created.
+- Because the harness is the sole writer once a run starts, no user edit can appear mid-run; the only untracked/modified paths a reset removes are this round's own materialized artifacts.
+
+The guard is the load-bearing safety property: without a clean start, `reset --hard` could delete pre-existing uncommitted work. With it, the reset is bounded to harness-authored, this-round-only changes.
+
 ### 5.1 Round-start snapshot
-`run_round` captures `round_start_sha = git rev-parse HEAD` immediately on entry (before any materialization).
+`run_round` captures `round_start_sha = git rev-parse HEAD` immediately on entry (after the §5.0 clean-worktree assert, before any materialization).
 
 ### 5.2 Wrapped commits
-Every commit in `run_round` (`commit_register_decision` 7a, `commit_canonicalize` 7b, the new `registry-sync` from §6, `commit_merge` 8) is wrapped. On `subprocess.CalledProcessError`:
-1. `git -C <ws> reset --hard <round_start_sha>` then `git -C <ws> clean -fd` — erase any partial commits from this round and all materialized/untracked files.
-2. Allocate `rj-*.md` (frontmatter `reason_class = "hook-rejected"`, `failed_phase = "commit"`, body = the captured git stderr).
-3. Commit it: `Action: hook-rejected`, `Variant`, `Round`, `Reason: hook-rejected`.
-4. Return `RoundOutcome(verdict="hook-rejected", reason="hook-rejected", rj_id=...)`.
+Every commit in `run_round` (`commit_register_decision` 7a, `commit_canonicalize` 7b, the new `registry-sync` from §6, `commit_merge` 8) is wrapped. On a commit failure (see §5.4 for how the failure surfaces with stderr):
+1. `git -C <ws> reset --hard <round_start_sha>` then `git -C <ws> clean -fd` — erase any partial commits from this round and this round's untracked non-ignored materialized files (new `ev-*.md`, `cl-*.json`, `at-*.json`, `doc/*.md`, `rounds/{round}/patch.diff`).
+2. **Ignored files are intentionally preserved.** `clean -fd` (not `-fdX`) does not touch ignored paths, so the rebuildable `derived/` cache (`decisions.json`) and the diagnostic `rounds/*/scratch/` survive the reset — which is correct: the cache is regenerated from `goal.toml` and the scratch is audit-only. We never wipe ignored files on a round reset.
+3. Allocate `rj-*.md` (frontmatter `reason_class = "hook-rejected"`, `failed_phase = "commit"`, body = the captured git stderr from §5.4).
+4. Commit it: `Action: hook-rejected`, `Variant`, `Round`, `Reason: hook-rejected`.
+5. Return `RoundOutcome(verdict="hook-rejected", reason="hook-rejected", rj_id=...)`.
 
 The rejection commit stages only `rejections/rj-*.md` + `actions.jsonl`, so it passes the hook. (If even that fails — degenerate — the exception propagates; documented as an accepted v0 limit.)
+
+### 5.4 Commit helpers must capture stderr
+The current `_git_commit` / `_git_add` helpers use `subprocess.check_call`, which lets git's stderr go to the terminal and does **not** capture it — so the rejection body in §5.2.3 would be empty. Change the commit helpers to `subprocess.run(cmd, capture_output=True, text=True)` and, on non-zero return, `raise subprocess.CalledProcessError(rc, cmd, output=stdout, stderr=stderr)` (or call `subprocess.run(..., check=True)` which populates `.stderr` when `capture_output=True`). `run_round`'s wrapper then reads `exc.stderr` for the rejection body. This applies to every commit helper reachable from the wrapped set.
 
 ### 5.3 Hook vocabulary
 `workspace_template/hooks/commit-msg`: add `"hook-rejected"` to `ALLOWED_ACTIONS` and `ALLOWED_REASONS`; `TRAILER_REQUIREMENTS["hook-rejected"] = {"Variant","Round","Reason"}`; `ACTION_FILE_WHITELIST["hook-rejected"] = ["rejections/rj-*.md","actions.jsonl"]`. `round_ledger._ALLOWED_REASONS += "hook-rejected"`.
@@ -108,11 +128,11 @@ Replace the silent `continue` on a malformed/unsafe `ev-`/`cl-`/`at-` id (`orche
 
 ## 8. Testing (TDD)
 
-- **`tests/test_bootstrap.py`** (new): `rebuild_decisions_cache` produces the seed decisions from a template `goal.toml`; `seed_variant_docs` creates valid section files for N variants and is idempotent (no overwrite when doc exists); `ensure_empty_registry`.
+- **`tests/test_bootstrap.py`** (new): `rebuild_decisions_cache` produces the seed decisions from a template `goal.toml`; `seed_variant_docs` creates valid section files for N variants and is idempotent (no overwrite when doc exists); `ensure_empty_registry`; `assert_clean_worktree` passes on a clean scaffold and raises/aborts on a dirty one (an uncommitted stray file).
 - **`tests/test_cli_init.py`** (extend): after `harness init`, `derived/decisions.json` exists with the seed decisions and `derived/canonical_slug_registry.json` exists (empty) and is committed.
 - **`tests/test_orchestrator_round.py`** (extend): a full mocked round on a **freshly-init'd** workspace with **no manual `derived/` seeding** reaches `merge` — the regression current tests hide by hand-seeding `decisions.json`.
-- **`tests/test_orchestrator_hook_reject.py`** (new): a round whose merge commit is forced to fail the hook resets to round-start (no orphan register-decision/canonicalize commits remain) and records `verdict="hook-rejected"`.
-- **`tests/test_context.py`** (extend): each builder's output contains the on-disk pointer paths and the goal title/description; Verifier-C context names `patch.diff` + the cited evidence paths.
+- **`tests/test_orchestrator_hook_reject.py`** (new): a round whose merge commit is forced to fail the hook resets to round-start (no orphan register-decision/canonicalize commits remain), records `verdict="hook-rejected"`, and the `rj-*.md` body contains the captured git stderr (proving §5.4). A second test confirms `assert_clean_worktree` aborts a run started on a dirty workspace (and that a pre-existing uncommitted file is **not** deleted — the data-loss guard).
+- **`tests/test_context.py`** (extend): each builder's output contains the on-disk pointer paths and the goal title/description; Verifier-C context names `patch.diff` + the cited evidence paths. Assert the role prompts carry the "read every path" instruction (§4.1a).
 - **`tests/test_spawn.py`** (extend): `spawn_role` invokes the runner with `cwd=workspace_root`.
 - **registry**: materializing decision claims appends canonicals and commits `registry-sync`; a subsequent high-confidence canonicalization toward an in-use canonical now applies.
 - **fail-loud**: `validate_designer_json` rejects each new bad-shape case; materialization raises (not skips) on a malformed/duplicate id.
