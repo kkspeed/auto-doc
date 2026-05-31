@@ -4,6 +4,9 @@ version = "0.0.1"
 description = "Design Doc Evolution Harness — claim graph module"
 requires-python = ">=3.11"
 
+[project.scripts]
+harness = "harness.cli:main"
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
