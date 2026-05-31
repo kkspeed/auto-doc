@@ -34,7 +34,7 @@ This sub-project also makes the schema/hook changes the two approved design deci
 | `harness/scorecard.py` | Pure scoring engine: compute six dimensions, apply merge gate, format `Score-Delta`. No git; reads only paths it is handed. | Create |
 | `harness/morning_brief.py` | Gather workspace state at pause; assemble full `morning_brief.md`. Imports `cg.render_*`. | Create |
 | `harness/orchestrator.py` | Insert Phase 6.5 gate; write `scorecard.json`; render brief at `run_loop` pause. | Modify |
-| `harness/round_ledger.py` | `commit_merge` gains `score_delta` + scorecard staging; new `commit_score_regression`. | Modify |
+| `harness/round_ledger.py` | `commit_merge` gains `score_delta` + scorecard staging; `score-regression` added to `_ALLOWED_REASONS`. | Modify |
 | `workspace_template/hooks/commit-msg` | New `score-regression` Action + Reason; `Score-Delta` trailer key + validator. | Modify |
 | `harness/orchestrator.py` validators | `validate_reviewer_json` enforces `goal_alignment` + `technical_correctness`. | Modify |
 | `workspace_template/harness.toml` | New `[scorecard]` table (`regression_tolerance`). | Modify |
@@ -47,7 +47,7 @@ Computed per variant, on the **materialized-but-uncommitted** doc state (after t
 
 | Dimension | v0 formula | Data source |
 |---|---|---|
-| `groundedness` | claims passing Verifier A+B ÷ total claims (this variant) | `verifiers` results + variant `claims/` |
+| `groundedness` | cl-*.json claims whose every `evidence_id` resolves to an existing, non-superseded evidence file ÷ total cl-*.json claims (this variant) | variant `claims/` + `evidence/` |
 | `goal_alignment` | reviewer's `goal_alignment` field | reviewer JSON |
 | `technical_correctness` | `reviewer.technical_correctness × vc_confirm_rate` (VC ran) else `reviewer.technical_correctness` | reviewer JSON × Verifier C `per_claim` |
 | `completeness` | decisions with status ∈ {open, proposed} that have a doc section ÷ total such decisions | `goal.toml` (or `derived/decisions.json`) + variant `doc/` |
@@ -60,6 +60,7 @@ Definitions:
 - **Empty denominators** (0 claims, 0 citations, 0 actions, 0 required decisions) → that dimension = **1.0** (vacuously satisfied). Documented per dimension.
 - **Dead ref** = a `[^ev-NNNNNN]` citation appearing in the variant's doc whose `evidence/ev-NNNNNN.md` is missing OR carries a non-empty `supersedes`/superseded marker. Citation extraction reuses the canonical `[^ev-NNNNNN]` form (the only legal citation form per parent §3).
 - **Deferred to v0.1:** contradiction detection in `coherence` (v0 is dead-refs-only); the "Survived adversarial review" brief section (D8).
+- **Saturation note (honest v0 limitation):** because Verifier A+B already gate every doc citation each round, `groundedness`, `coherence`, and `constitution_compliance` typically sit at **1.0** on a clean merged round. They are still computed and recorded (they document that the round is fully grounded/coherent/compliant, and they carry signal during pivots when evidence gets superseded). The merge gate's live "improved ≥1 dim" signal in practice comes from `goal_alignment`, `technical_correctness`, and `completeness`. This is acceptable for v0; per-dimension reweighting is a v0.1 concern.
 
 ## 4. Merge gate (orchestrator Phase 6.5)
 
@@ -75,9 +76,12 @@ Phase 6.5: compute scorecard on materialized doc state
    │     (≥1 dim strictly improved) AND (no dim dropped > δ below its prior)
    │     → write scorecard.json; carry Score-Delta into the merge commit
    └─ baseline exists, gate FAIL:
-         → _discard_materialized()           (nothing registry-committed yet)
-         → write rejections/rj-*.md
-         → commit_score_regression(...)       (Action: score-regression)
+         → _reject(action="score-regression",
+                   reason_class="score-regression",
+                   failed_phase="scorecard", detail=<per-dim deltas>)
+           (the existing closure: discards materialized tree, writes
+            rejections/rj-*.md, commits via commit_rejection with
+            Action+Reason score-regression — no Score-Delta trailer)
          → return RoundOutcome(verdict="score-regression")
    ↓ (pass)
 Phase 7a register-decision → 7b canonicalize → Phase 8 merge
@@ -135,7 +139,7 @@ regression_tolerance = 0.05
 ## 6. `round_ledger.py` changes
 
 - `commit_merge(...)` gains a `score_delta: str | None` parameter. When non-None, appends a `Score-Delta: <str>` trailer line. Stages `variants/nodes/<variant>/scorecard.json` alongside the existing materialized paths.
-- New `commit_score_regression(workspace_root, round_id, variant_id, rj_id, score_delta)`: stages `rejections/<rj_id>.md` + `actions.jsonl`, commits with `Action: score-regression`, `Variant`, `Round`, `Reason: score-regression`. (Mirrors `commit_rejection`; does not stage `scorecard.json` — no scorecard is written on a failed gate.)
+- Add `"score-regression"` to the module-level `_ALLOWED_REASONS` frozenset so `commit_rejection` emits the `Reason: score-regression` trailer. No new commit function: the gate-failure path reuses `commit_rejection` through the orchestrator's existing `_reject` closure (Action `score-regression` is now hook-valid). No scorecard is written on a failed gate, so none is staged.
 
 ## 7. `morning_brief.py` — assembly
 
@@ -161,7 +165,7 @@ A run's commit range is `<sha at run_loop start>..HEAD`. `run_loop` captures the
 ## 8. Testing (TDD)
 
 - **`tests/test_scorecard.py`** (new): each dimension formula incl. every empty-denominator case; `vc_confirm_rate` with/without VC; gate pass / fail / bootstrap; δ boundary (drop of exactly δ passes, δ+ε fails); `Score-Delta` string format; no-op round fails (D7).
-- **`tests/test_orchestrator_score_gate.py`** (new): Phase 6.5 with mocked spawns — bootstrap merges; improving round merges + writes `scorecard.json` + Score-Delta trailer; regressing round rejects with `score-regression`, discards materialized tree, leaves no registry commit.
+- **`tests/test_orchestrator_score_gate.py`** (new): Phase 6.5 with mocked spawns — bootstrap merges; improving round merges + writes `scorecard.json` + Score-Delta trailer; regressing round returns `verdict="score-regression"` via `_reject`, discards materialized tree, leaves no register-decision/canonicalize commit.
 - **`tests/test_commit_msg_hook.py`** (extend): `score-regression` Action accepted with required trailers / rejected without; `Score-Delta` accepted on merge with valid format / rejected with malformed value / rejected on non-merge Action.
 - **`tests/test_morning_brief_render.py`** (extend): full-assembly ordering; score-trajectory parse from git log; still-weak from VC verdicts; "look at first" ranking; empty-workspace friendly states.
 - **reviewer validator tests** (extend existing): missing/out-of-range `goal_alignment`/`technical_correctness` rejected.
