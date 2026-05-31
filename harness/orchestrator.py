@@ -80,13 +80,32 @@ def validate_designer_json(d: dict) -> None:
     for key in ("round", "variant", "patch_diff", "evidence", "claims"):
         if key not in d:
             raise ValueError(f"designer.json missing {key!r}")
+    if not isinstance(d["patch_diff"], str):
+        raise ValueError("designer.json patch_diff must be a string")
     if not isinstance(d["claims"], list):
         raise ValueError("designer.json claims must be a list")
     if not isinstance(d["evidence"], list):
         raise ValueError("designer.json evidence must be a list")
-    # Each claim must roundtrip through Claim.from_dict
+    evidence_ids = set()
+    for ev in d["evidence"]:
+        if not isinstance(ev, dict):
+            raise ValueError("designer.json evidence item must be an object")
+        ev_id = ev.get("id")
+        if not isinstance(ev_id, str) or not re.match(r"^ev-\d{6}$", ev_id):
+            raise ValueError(
+                f"designer.json evidence id invalid: {ev_id!r}")
+        for k in ("confidence", "citations", "claim", "excerpt"):
+            if k not in ev:
+                raise ValueError(
+                    f"designer.json evidence {ev_id} missing {k!r}")
+        evidence_ids.add(ev_id)
     for c in d["claims"]:
-        cg.Claim.from_dict(c)
+        cg.Claim.from_dict(c)  # slug + required-field checks
+        for ref in c.get("evidence_ids", []) or []:
+            if ref not in evidence_ids:
+                raise ValueError(
+                    f"designer.json claim {c.get('id')} cites {ref!r} not in "
+                    "this round's evidence")
 
 
 def validate_reviewer_json(d: dict) -> None:
@@ -229,7 +248,8 @@ def _materialize_designer_output(
     for ev in parsed.get("evidence", []) or []:
         ev_id = ev.get("id", "")
         if not ev_id or not _ID_RE.match(ev_id):
-            continue   # skip malformed/unsafe ids (path traversal guard)
+            raise RuntimeError(
+                f"materialize: malformed/unsafe evidence id {ev_id!r}")
         # Build TOML frontmatter using basic strings with proper escapes.
         # Triple-quoted strings can't be safely escaped if the content
         # contains literal `"""`, so we use single-line basic strings
@@ -251,10 +271,16 @@ def _materialize_designer_output(
     # Claims
     claims_dir = workspace_root / "variants" / "nodes" / variant_id / "claims"
     claims_dir.mkdir(parents=True, exist_ok=True)
+    seen_claim_ids: set[str] = set()
     for claim in parsed.get("claims", []) or []:
         cl_id = claim.get("id", "")
         if not cl_id or not _ID_RE.match(cl_id):
-            continue   # skip malformed/unsafe ids (path traversal guard)
+            raise RuntimeError(
+                f"materialize: malformed/unsafe claim id {cl_id!r}")
+        if cl_id in seen_claim_ids:
+            raise RuntimeError(
+                f"materialize: duplicate claim id {cl_id!r} in round")
+        seen_claim_ids.add(cl_id)
         cl_path = claims_dir / f"{cl_id}.json"
         cl_path.write_text(json.dumps(claim, indent=2, sort_keys=True))
         materialized.append(cl_path)
@@ -291,6 +317,12 @@ def _materialize_designer_output(
                     section_paths.append(rel)
                     materialized.append(workspace_root / rel)
 
+    # Write the round's patch.diff pointer (always, even when empty) so
+    # Reviewer/Verifier-C CONTEXT.md can point at a stable on-disk file.
+    round_dir = workspace_root / "rounds" / parsed.get("round", "")
+    round_dir.mkdir(parents=True, exist_ok=True)
+    (round_dir / "patch.diff").write_text(patch_diff, encoding="utf-8")
+
     return materialized, section_paths, claim_paths, attack_paths, evidence_paths
 
 
@@ -305,7 +337,8 @@ def _materialize_reviewer_attacks(
     for at in parsed.get("attacks", []) or []:
         at_id = at.get("id", "")
         if not at_id or not _ID_RE.match(at_id):
-            continue   # skip malformed/unsafe ids (path traversal guard)
+            raise RuntimeError(
+                f"materialize: malformed/unsafe attack id {at_id!r}")
         attacks_dir.mkdir(parents=True, exist_ok=True)
         at_path = attacks_dir / f"{at_id}.json"
         at_path.write_text(json.dumps(at, indent=2, sort_keys=True))

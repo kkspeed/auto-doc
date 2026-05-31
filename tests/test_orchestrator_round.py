@@ -835,5 +835,59 @@ class PromptReadInstructionTest(unittest.TestCase):
             self.assertIn("Read these first", p)
 
 
+class MaterializeFailLoudTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_malformed_evidence_id_raises(self):
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": "", "evidence": [{"id": "../etc/passwd"}],
+                  "claims": []}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", parsed)
+
+    def test_duplicate_claim_id_raises(self):
+        c = {"id": "cl-000001", "decision_id": "retry-policy",
+             "section_id": "retry-policy", "claim_type": "decision",
+             "position": "expo", "evidence_ids": []}
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": "", "evidence": [],
+                  "claims": [dict(c), dict(c)]}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", parsed)
+
+    def test_patch_diff_file_written(self):
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": "", "evidence": [], "claims": []}
+        orchestrator._materialize_designer_output(self.ws, "v-001", parsed)
+        self.assertTrue(
+            (self.ws / "rounds" / "round-000001" / "patch.diff").exists())
+
+
+class ValidateDesignerStrictTest(unittest.TestCase):
+    def test_non_string_patch_diff_raises(self):
+        with self.assertRaises(ValueError):
+            orchestrator.validate_designer_json({
+                "round": "r", "variant": "v", "patch_diff": 123,
+                "evidence": [], "claims": []})
+
+    def test_claim_evidence_id_not_in_round_raises(self):
+        with self.assertRaises(ValueError):
+            orchestrator.validate_designer_json({
+                "round": "r", "variant": "v", "patch_diff": "",
+                "evidence": [{"id": "ev-000001", "confidence": "high",
+                              "citations": [], "claim": "c", "excerpt": "e"}],
+                "claims": [{"id": "cl-000001", "decision_id": "d",
+                            "section_id": "d", "claim_type": "decision",
+                            "position": "p", "evidence_ids": ["ev-999999"]}]})
+
+
 if __name__ == "__main__":
     unittest.main()
