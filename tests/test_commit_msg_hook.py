@@ -389,5 +389,53 @@ class ScoreRegressionActionTest(unittest.TestCase):
         self.assertIn("Reason", result.stderr)
 
 
+class ScoreDeltaTrailerTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _merge_msg(self, score_delta_line):
+        # Stage a doc section so the merge whitelist is satisfied.
+        doc = self.ws / "variants" / "nodes" / "v-001" / "doc" / "01-x.md"
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text('+++\nsection_id = "x"\n+++\n## X\nbody\n')
+        subprocess.check_call(["git", "-C", str(self.ws), "add", "-f",
+                               "variants/nodes/v-001/doc/01-x.md"])
+        return _write_msg(self.ws,
+            "feat: round-000002 v-001\n\n"
+            "Action: merge\nVariant: v-001\nRound: round-000002\n"
+            + score_delta_line)
+
+    def test_valid_score_delta_on_merge_passes(self):
+        msg = self._merge_msg(
+            "Score-Delta: groundedness=+0.04 completeness=-0.01\n")
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+
+    def test_malformed_score_delta_rejects(self):
+        msg = self._merge_msg("Score-Delta: groundedness=up\n")
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Score-Delta", result.stderr)
+
+    def test_score_delta_on_non_merge_action_rejects(self):
+        rej = self.ws / "rejections" / "rj-000001.md"
+        rej.parent.mkdir(parents=True, exist_ok=True)
+        rej.write_text("+++\n+++\nbody\n")
+        subprocess.check_call(["git", "-C", str(self.ws), "add", "-f",
+                               "rejections/rj-000001.md"])
+        msg = _write_msg(self.ws,
+            "chore: reject\n\nAction: reviewer-rejected\nVariant: v-001\n"
+            "Round: round-000002\nReason: cross-field-fail\nReviewer: v-001\n"
+            "Score-Delta: groundedness=+0.04\n")
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Score-Delta", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

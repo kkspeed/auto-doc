@@ -32,6 +32,7 @@ ALLOWED_REASONS = frozenset({
 
 VARIANT_RE = re.compile(r"^v-\d{3}$")
 ROUND_RE = re.compile(r"^round-\d{6}$")
+SCORE_DELTA_TOKEN_RE = re.compile(r"^[a-z_]+=[+-]\d+\.\d{2}$")
 
 # Standard Git trailers that pass through untouched.
 STANDARD_TRAILERS = frozenset({"Signed-off-by", "Co-authored-by"})
@@ -354,6 +355,15 @@ def validate_trailers(trailers):
                 errors.append(
                     f"Reviewer {value!r} does not match ^v-\\d{{3}}$"
                 )
+        elif key == "Score-Delta":
+            tokens = value.split()
+            if not tokens or not all(
+                SCORE_DELTA_TOKEN_RE.match(t) for t in tokens
+            ):
+                errors.append(
+                    f"Score-Delta {value!r} must be space-separated "
+                    "dim=[+-]N.NN tokens"
+                )
         else:
             errors.append(f"unknown trailer key {key!r}")
     return errors, seen_keys
@@ -365,6 +375,15 @@ def check_required_trailers(action, seen_keys):
     required = TRAILER_REQUIREMENTS[action]
     return [f"Action: {action} requires trailer {k!r}"
             for k in sorted(required) if k not in seen_keys]
+
+
+def check_score_delta_action(action, seen_keys):
+    if "Score-Delta" in seen_keys and action != "merge":
+        return [
+            "Score-Delta trailer is only allowed on Action: merge "
+            f"(got Action: {action!r})"
+        ]
+    return []
 
 
 # ----- Main -------------------------------------------------------------------
@@ -388,6 +407,7 @@ def main():
 
     if action is not None and action in ALLOWED_ACTIONS:
         errors.extend(check_required_trailers(action, seen_keys))
+        errors.extend(check_score_delta_action(action, seen_keys))
         files = staged_files()
         errors.extend(check_file_whitelist(action, files))
         errors.extend(check_scope(action, files))
