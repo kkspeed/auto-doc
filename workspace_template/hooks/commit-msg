@@ -20,14 +20,14 @@ from pathlib import Path
 ALLOWED_ACTIONS = frozenset({
     "init", "merge", "register-decision", "canonicalize", "registry-sync",
     "reviewer-rejected", "phase-a-fail", "phase-b-fail", "phase-c-dispute",
-    "spawn-failed", "output-parse-fail", "score-regression",
+    "spawn-failed", "output-parse-fail", "score-regression", "hook-rejected",
 })
 
 ALLOWED_REASONS = frozenset({
     "uncited-claim", "cross-field-fail", "vacuous-position",
     "proposal-rejected", "scope-violation", "immutability-violation",
     "phantom-claim", "dangling-evidence", "silent-goal-toml-edit",
-    "score-regression",
+    "score-regression", "hook-rejected",
 })
 
 VARIANT_RE = re.compile(r"^v-\d{3}$")
@@ -52,6 +52,7 @@ TRAILER_REQUIREMENTS = {
     "spawn-failed": {"Variant", "Round"},
     "output-parse-fail": {"Variant", "Round"},
     "score-regression": {"Variant", "Round", "Reason"},
+    "hook-rejected": {"Variant", "Round", "Reason"},
 }
 
 
@@ -108,6 +109,7 @@ ACTION_FILE_WHITELIST = {
     "spawn-failed": ["rejections/rj-*.md", "actions.jsonl"],
     "output-parse-fail": ["rejections/rj-*.md", "actions.jsonl"],
     "score-regression": ["rejections/rj-*.md", "actions.jsonl"],
+    "hook-rejected": ["rejections/rj-*.md", "actions.jsonl"],
 }
 
 

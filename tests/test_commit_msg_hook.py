@@ -437,5 +437,36 @@ class ScoreDeltaTrailerTest(unittest.TestCase):
         self.assertIn("Score-Delta", result.stderr)
 
 
+class HookRejectedActionTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_hook_rejected_with_required_trailers_passes(self):
+        rej = self.ws / "rejections" / "rj-000001.md"
+        rej.parent.mkdir(parents=True, exist_ok=True)
+        rej.write_text("+++\n+++\nbody\n")
+        subprocess.check_call(["git", "-C", str(self.ws), "add", "-f",
+                               "rejections/rj-000001.md"])
+        msg = _write_msg(self.ws,
+            "chore: hook-rejected for round-000002 v-001\n\n"
+            "Action: hook-rejected\nVariant: v-001\n"
+            "Round: round-000002\nReason: hook-rejected\n")
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+
+    def test_hook_rejected_missing_reason_rejects(self):
+        msg = _write_msg(self.ws,
+            "chore: hook-rejected\n\n"
+            "Action: hook-rejected\nVariant: v-001\nRound: round-000002\n")
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Reason", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
