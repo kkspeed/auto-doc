@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -681,6 +682,61 @@ def run_round(
     )
 
 
-def run_loop(*args, **kwargs):
-    """run_loop is implemented in Task 5."""
-    raise NotImplementedError("run_loop lands in Task 5")
+_ROUND_DIR_RE = re.compile(r"^round-(\d{6})$")
+
+
+def _next_round_number(workspace_root: Path) -> int:
+    rounds_root = workspace_root / "rounds"
+    if not rounds_root.exists():
+        return 1
+    max_n = 0
+    for d in rounds_root.iterdir():
+        if not d.is_dir():
+            continue
+        m = _ROUND_DIR_RE.match(d.name)
+        if m:
+            n = int(m.group(1))
+            if n > max_n:
+                max_n = n
+    return max_n + 1
+
+
+def run_loop(
+    workspace_root: Path,
+    harness_config: dict,
+    max_rounds: int | None = None,
+    max_wall_clock_hours: float | None = None,
+    variant_count: int = 2,
+) -> list[RoundOutcome]:
+    """Drive rounds in sequence with variant rotation. Stops at whichever cap
+    fires first. At least one of max_rounds / max_wall_clock_hours required.
+
+    Variant rotation: round N → v-{((N-1) % variant_count) + 1:03d}.
+    Round-id allocation: discovers max existing rounds/round-* dir, starts
+    at max+1 (so resume across runs is natural)."""
+    if max_rounds is None and max_wall_clock_hours is None:
+        raise ValueError(
+            "run_loop requires at least one of max_rounds or "
+            "max_wall_clock_hours"
+        )
+
+    loop_start = time.monotonic()
+    outcomes: list[RoundOutcome] = []
+    next_n = _next_round_number(workspace_root)
+
+    while True:
+        if max_rounds is not None and len(outcomes) >= max_rounds:
+            break
+        if max_wall_clock_hours is not None and \
+           time.monotonic() - loop_start >= max_wall_clock_hours * 3600:
+            break
+        round_id = f"round-{next_n:06d}"
+        variant_n = ((next_n - 1) % variant_count) + 1
+        variant_id = f"v-{variant_n:03d}"
+        outcome = run_round(
+            workspace_root, harness_config, round_id, variant_id,
+        )
+        outcomes.append(outcome)
+        next_n += 1
+
+    return outcomes
