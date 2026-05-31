@@ -125,3 +125,32 @@ class AssertCleanWorktreeTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, nongit, ignore_errors=True)
         with self.assertRaises(bootstrap.DirtyWorktreeError):
             bootstrap.assert_clean_worktree(nongit)
+
+
+class SeedVariantDocsTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        (self.td / "seed_doc.md").write_text("<!-- seed -->\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_seeds_n_variants(self):
+        created = bootstrap.seed_variant_docs(self.td, 2)
+        self.assertEqual(created, [
+            "variants/nodes/v-001/doc/00-overview.md",
+            "variants/nodes/v-002/doc/00-overview.md",
+        ])
+        body = (self.td / "variants" / "nodes" / "v-001" / "doc"
+                / "00-overview.md").read_text()
+        self.assertIn('section_id = "overview"', body)
+        self.assertIn("<!-- seed -->", body)
+
+    def test_idempotent_when_doc_exists(self):
+        bootstrap.seed_variant_docs(self.td, 1)
+        created = bootstrap.seed_variant_docs(self.td, 1)
+        self.assertEqual(created, [])
+
+    def test_missing_seed_doc_is_noop(self):
+        (self.td / "seed_doc.md").unlink()
+        self.assertEqual(bootstrap.seed_variant_docs(self.td, 2), [])

@@ -82,3 +82,31 @@ def assert_clean_worktree(workspace_root: Path) -> None:
         raise DirtyWorktreeError(
             "workspace has uncommitted changes — commit or discard before "
             f"running:\n{out.stdout.rstrip()}")
+
+
+def seed_variant_docs(workspace_root: Path, variant_count: int) -> list[str]:
+    """Seed each active variant (v-001..v-{variant_count:03d}) that has no doc
+    yet with seed_doc.md's body as a single overview section. Returns the list
+    of relative paths created (empty if nothing was seeded). No-op when
+    seed_doc.md is absent."""
+    seed_path = workspace_root / "seed_doc.md"
+    if not seed_path.exists():
+        return []
+    seed_body = seed_path.read_text(encoding="utf-8", errors="replace")
+    created: list[str] = []
+    for n in range(1, variant_count + 1):
+        variant_id = f"v-{n:03d}"
+        doc_dir = workspace_root / "variants" / "nodes" / variant_id / "doc"
+        if doc_dir.exists() and any(doc_dir.glob("*.md")):
+            continue  # already has a document; do not re-seed
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        rel = f"variants/nodes/{variant_id}/doc/00-overview.md"
+        frontmatter = (
+            "+++\n"
+            'section_id = "overview"\n'
+            'tags = []\n'
+            "+++\n\n"
+        )
+        (workspace_root / rel).write_text(frontmatter + seed_body)
+        created.append(rel)
+    return created
