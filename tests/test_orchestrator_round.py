@@ -798,5 +798,27 @@ class RunRoundFlowCTest(unittest.TestCase):
         self.assertEqual(cl["position"], "exponential-backoff")
 
 
+class ReviewerScoreFieldsValidatorTest(unittest.TestCase):
+    BASE = {
+        "round": "round-000001", "variant": "v-001",
+        "decision": "accept", "rationale": "ok",
+        "goal_alignment": 0.8, "technical_correctness": 0.7,
+    }
+
+    def test_valid_payload_passes(self):
+        orchestrator.validate_reviewer_json(dict(self.BASE))  # no raise
+
+    def test_missing_goal_alignment_raises(self):
+        d = dict(self.BASE)
+        del d["goal_alignment"]
+        with self.assertRaises(ValueError):
+            orchestrator.validate_reviewer_json(d)
+
+    def test_out_of_range_technical_correctness_raises(self):
+        d = dict(self.BASE, technical_correctness=1.4)
+        with self.assertRaises(ValueError):
+            orchestrator.validate_reviewer_json(d)
+
+
 if __name__ == "__main__":
     unittest.main()

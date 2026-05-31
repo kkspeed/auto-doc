@@ -86,13 +86,20 @@ def validate_designer_json(d: dict) -> None:
 
 
 def validate_reviewer_json(d: dict) -> None:
-    for key in ("round", "variant", "decision", "rationale"):
+    for key in ("round", "variant", "decision", "rationale",
+                "goal_alignment", "technical_correctness"):
         if key not in d:
             raise ValueError(f"reviewer.json missing {key!r}")
     if d["decision"] not in ("accept", "reject"):
         raise ValueError(
             f"reviewer.json decision must be accept|reject, got {d['decision']!r}"
         )
+    for key in ("goal_alignment", "technical_correctness"):
+        v = d[key]
+        if not isinstance(v, (int, float)) or not (0.0 <= v <= 1.0):
+            raise ValueError(
+                f"reviewer.json {key} must be a float in [0,1], got {v!r}"
+            )
     # decision_proposals and attacks roundtrip via their dataclass from_dict
     for v in d.get("decision_proposals", []) or []:
         cg.DecisionProposalVerdict.from_dict(v)
@@ -144,7 +151,11 @@ REVIEWER_PROMPT = (
     "rejection {reason_class, ...} on reject, optional decision_proposals "
     "(list of {proposed_id, verdict (approve|reject), rationale}) when the "
     "designer proposed new decisions, optional attacks (list of at-*.json "
-    "dicts). Output ONLY valid JSON."
+    "dicts). "
+    "Also emit goal_alignment (float in [0,1]) scoring how well this round's "
+    "doc serves the stated goal, and technical_correctness (float in [0,1]) "
+    "scoring how technically correct the cited claims are. "
+    "Output ONLY valid JSON."
 )
 
 VERIFIER_C_PROMPT = (
