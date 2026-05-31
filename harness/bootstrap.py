@@ -104,9 +104,11 @@ def seed_variant_docs(workspace_root: Path, variant_count: int) -> list[str]:
         frontmatter = (
             "+++\n"
             'section_id = "overview"\n'
+            'created_round = "round-000000"\n'
             'tags = []\n'
             "+++\n\n"
         )
-        (workspace_root / rel).write_text(frontmatter + seed_body)
+        (workspace_root / rel).write_text(
+            frontmatter + seed_body, encoding="utf-8")
         created.append(rel)
     return created

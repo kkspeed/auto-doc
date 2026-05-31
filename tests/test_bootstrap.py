@@ -154,3 +154,20 @@ class SeedVariantDocsTest(unittest.TestCase):
     def test_missing_seed_doc_is_noop(self):
         (self.td / "seed_doc.md").unlink()
         self.assertEqual(bootstrap.seed_variant_docs(self.td, 2), [])
+
+    def test_frontmatter_parses_as_toml(self):
+        import tomllib
+        bootstrap.seed_variant_docs(self.td, 1)
+        text = (self.td / "variants" / "nodes" / "v-001" / "doc"
+                / "00-overview.md").read_text()
+        fm = text.split("+++")[1]
+        meta = tomllib.loads(fm)
+        self.assertEqual(meta["section_id"], "overview")
+        self.assertEqual(meta["tags"], [])
+        self.assertEqual(meta["created_round"], "round-000000")
+
+    def test_seeds_into_existing_empty_doc_dir(self):
+        # doc dir exists but has no *.md -> not yet seeded, so seed it.
+        (self.td / "variants" / "nodes" / "v-001" / "doc").mkdir(parents=True)
+        created = bootstrap.seed_variant_docs(self.td, 1)
+        self.assertEqual(created, ["variants/nodes/v-001/doc/00-overview.md"])
