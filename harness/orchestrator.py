@@ -15,7 +15,9 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import subprocess
 import time
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from harness import claim_graph as cg
 from harness import context as context_mod
 from harness import round_ledger
 from harness import verifiers
+from harness import scorecard as scorecard_mod
 from harness.round_ledger import _ALLOWED_REASONS
 from harness.spawn import RoleOutput, spawn_role
 
@@ -129,6 +132,25 @@ def _now_iso() -> str:
 def _log(workspace_root: Path, event: str, **fields) -> None:
     entry = {"ts": _now_iso(), "event": event, **fields}
     round_ledger.append_actions_log(workspace_root, entry)
+
+
+def _read_round_actions(workspace_root: Path, round_id: str) -> list[dict]:
+    """Return actions.jsonl entries tagged with this round_id."""
+    path = workspace_root / "actions.jsonl"
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("round_id") == round_id or entry.get("round") == round_id:
+            out.append(entry)
+    return out
 
 
 PLANNER_PROMPT = (
@@ -642,6 +664,57 @@ def run_round(
             detail="Verifier C disputed claims:\n" + "\n".join(disputed),
         )
 
+    # ---- Phase 6.5: Scorecard merge gate ----
+    variant_claims_dir = variants_root / variant_id / "claims"
+    variant_doc_dir = variants_root / variant_id / "doc"
+    goal_toml_path = workspace_root / "goal.toml"
+    decisions_list: list[dict] = []
+    if goal_toml_path.exists():
+        try:
+            with goal_toml_path.open("rb") as f:
+                decisions_list = tomllib.load(f).get("decision", []) or []
+        except (tomllib.TOMLDecodeError, OSError):
+            decisions_list = []
+    round_actions = _read_round_actions(workspace_root, round_id)
+    new_dimensions = scorecard_mod.compute_dimensions(
+        variant_claims_dir=variant_claims_dir,
+        variant_doc_dir=variant_doc_dir,
+        evidence_root=evidence_root,
+        decisions=decisions_list,
+        round_actions=round_actions,
+        reviewer_goal_alignment=reviewer_result.parsed["goal_alignment"],
+        reviewer_technical_correctness=reviewer_result.parsed[
+            "technical_correctness"],
+        vc_per_claim=vc_parsed.get("per_claim", []),
+    )
+    sc_path = variants_root / variant_id / "scorecard.json"
+    sc_rel = f"variants/nodes/{variant_id}/scorecard.json"
+    prior = scorecard_mod.load_scorecard(sc_path)
+    prior_dims = prior["dimensions"] if prior else None
+    tolerance = harness_config.get("scorecard", {}).get(
+        "regression_tolerance", 0.05)
+    passed, gate_detail = scorecard_mod.evaluate_gate(
+        prior_dims, new_dimensions, tolerance)
+    _log(workspace_root, "scorecard", round_id=round_id,
+         variant_id=variant_id, passed=passed, detail=gate_detail,
+         dimensions=new_dimensions)
+    if not passed:
+        return _reject(
+            action="score-regression",
+            reason_class="score-regression",
+            failed_phase="scorecard",
+            detail=f"scorecard gate failed ({gate_detail})",
+        )
+    scorecard_mod.write_scorecard(
+        sc_path,
+        scorecard_mod.build_scorecard(variant_id, round_id, new_dimensions),
+    )
+    materialized.append(sc_path)
+    score_delta = (
+        None if prior_dims is None
+        else scorecard_mod.format_score_delta(prior_dims, new_dimensions)
+    )
+
     # ---- Phase 7a: Flow A — register-decision ----
     if approved_proposals:
         goal_toml_path = workspace_root / "goal.toml"
@@ -711,6 +784,7 @@ def run_round(
         workspace_root, round_id=round_id, variant_id=variant_id,
         section_paths=section_paths, claim_paths=claim_paths,
         attack_paths=attack_paths, evidence_paths=evidence_paths,
+        score_delta=score_delta, scorecard_path=sc_rel,
     )
     _log(workspace_root, "commit", round_id=round_id, action="merge")
     _log(workspace_root, "round_end", round_id=round_id, verdict="merge")

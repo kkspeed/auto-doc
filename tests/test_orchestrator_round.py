@@ -71,10 +71,13 @@ def _designer_ok(round_id="round-000001", variant="v-001",
 
 def _reviewer_ok(round_id="round-000001", variant="v-001",
                  decision="accept", decision_proposals=None, attacks=None,
-                 rejection=None):
+                 rejection=None, goal_alignment=0.8,
+                 technical_correctness=0.7):
     parsed = {
         "round": round_id, "variant": variant,
         "decision": decision, "rationale": "looks fine",
+        "goal_alignment": goal_alignment,
+        "technical_correctness": technical_correctness,
     }
     if decision_proposals is not None:
         parsed["decision_proposals"] = decision_proposals
