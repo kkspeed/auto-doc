@@ -205,7 +205,7 @@ Expected: All template tests pass.
 - [ ] **Step 7: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 134 tests / OK` (127 existing + 7 new).
+Expected: `Ran 135 tests / OK` (127 existing + 8 new).
 
 - [ ] **Step 8: Commit**
 
@@ -494,7 +494,7 @@ Note: the `init_initial_commit_has_action_init_trailer` test will pass even thou
 - [ ] **Step 6: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 141 tests / OK`.
+Expected: `Ran 142 tests / OK`.
 
 - [ ] **Step 7: Commit**
 
@@ -1183,7 +1183,7 @@ Expected: All parity tests pass (3 test methods, ~24 subTests) AND all 7 schema 
 - [ ] **Step 6: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 151 tests / OK` (141 + 3 parity methods + 7 integration).
+Expected: `Ran 152 tests / OK` (142 + 3 parity methods + 7 integration).
 
 - [ ] **Step 7: Commit**
 
@@ -1359,7 +1359,7 @@ Expected: All 10 tests pass (7 schema + 3 citation).
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 154 tests / OK`.
+Expected: `Ran 155 tests / OK`.
 
 - [ ] **Step 6: Commit**
 
@@ -1646,7 +1646,7 @@ Expected: All 5 trailer tests pass.
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 159 tests / OK`.
+Expected: `Ran 160 tests / OK`.
 
 - [ ] **Step 6: Commit**
 
@@ -1854,7 +1854,7 @@ Expected: All 10 tests pass (5 trailer + 5 file-set).
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 164 tests / OK`.
+Expected: `Ran 165 tests / OK`.
 
 - [ ] **Step 6: Commit**
 
@@ -2197,7 +2197,7 @@ Expected: All 17 tests pass (5 trailer + 5 file-set + 2 scope + 5 immutability).
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 171 tests / OK` (164 + 7 = 171 — slightly higher than the spec's ~162 estimate because the test plan padded fixture counts conservatively).
+Expected: `Ran 172 tests / OK` (165 + 7 = 172 — slightly higher than the spec's ~162 estimate because the test plan padded fixture counts conservatively).
 
 - [ ] **Step 6: Commit**
 

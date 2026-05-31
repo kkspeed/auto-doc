@@ -205,12 +205,12 @@ def _normalize_text(s: str) -> str:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest tests.test_verifiers -v`
-Expected: 8 tests pass.
+Expected: 10 tests pass (plan prose previously said 8, but the test code block has 10 methods — 2+2+6 across the three test classes).
 
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 184 tests / OK` (176 existing + 8 new).
+Expected: `Ran 186 tests / OK` (176 existing + 10 new).
 
 - [ ] **Step 6: Commit**
 
@@ -395,7 +395,7 @@ Expected: All 6 walk tests pass.
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 190 tests / OK` (184 + 6).
+Expected: `Ran 192 tests / OK` (186 + 6).
 
 - [ ] **Step 6: Commit**
 
@@ -550,7 +550,7 @@ Expected: All 6 tests pass.
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 196 tests / OK` (190 + 6).
+Expected: `Ran 199 tests / OK` (193 + 6).
 
 - [ ] **Step 6: Commit**
 
@@ -712,7 +712,7 @@ Expected: All 5 tests pass.
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 201 tests / OK` (196 + 5).
+Expected: `Ran 204 tests / OK` (199 + 5).
 
 - [ ] **Step 6: Commit**
 
@@ -957,7 +957,7 @@ Expected: All 8 tests pass.
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: `Ran 209 tests / OK` (201 + 8).
+Expected: `Ran 213 tests / OK` (205 + 8).
 
 - [ ] **Step 6: Commit**
 
@@ -1037,7 +1037,7 @@ If no fixes were needed, skip this step.
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd /Users/liwen/develop/projects/auto_design_doc && python3 -m unittest discover tests/ 2>&1 | tail -3`
-Expected: at minimum 209 tests pass; possibly more if the review added regression tests.
+Expected: at minimum 213 tests pass; possibly more if the review added regression tests.
 
 ---
 
