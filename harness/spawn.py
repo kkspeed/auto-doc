@@ -50,7 +50,7 @@ def _run_with_heartbeat(
     stdin_text: str,
     spawn_timeout_seconds: int,
     silence_threshold_seconds: int = 90,
-    cwd=None,
+    cwd: "str | Path | None" = None,
 ) -> _RunResult:
     """Spawn cmd, send stdin_text, watch for output silence.
 

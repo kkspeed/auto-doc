@@ -1,5 +1,7 @@
 import dataclasses
+import io
 import unittest
+from unittest import mock
 
 from harness import spawn
 
@@ -420,10 +422,7 @@ class SpawnRoleConfigTest(unittest.TestCase):
 
 
 class SpawnCwdTest(unittest.TestCase):
-    def test_run_with_heartbeat_passes_cwd(self):
-        import io
-        from unittest import mock
-        import harness.spawn as spawn_mod
+    def _fake_popen_capture(self):
         captured = {}
 
         class _FakeProc:
@@ -437,10 +436,22 @@ class SpawnCwdTest(unittest.TestCase):
             def wait(self, timeout=None): return 0
             def kill(self): pass
 
-        with mock.patch.object(spawn_mod.subprocess, "Popen", _FakeProc):
-            spawn_mod._run_with_heartbeat(
-                ["echo"], "hi", 5, cwd="/tmp/some-workspace")
+        return captured, _FakeProc
+
+    def test_run_with_heartbeat_passes_cwd(self):
+        captured, fake = self._fake_popen_capture()
+        with mock.patch.object(spawn.subprocess, "Popen", fake):
+            spawn._run_with_heartbeat(
+                ["echo"], "hi", 5, silence_threshold_seconds=5,
+                cwd="/tmp/some-workspace")
         self.assertEqual(captured["cwd"], "/tmp/some-workspace")
+
+    def test_run_with_heartbeat_none_cwd_passes_none(self):
+        captured, fake = self._fake_popen_capture()
+        with mock.patch.object(spawn.subprocess, "Popen", fake):
+            spawn._run_with_heartbeat(
+                ["echo"], "hi", 5, silence_threshold_seconds=5, cwd=None)
+        self.assertIsNone(captured["cwd"])  # None, not the string "None"
 
 
 if __name__ == "__main__":
