@@ -493,8 +493,63 @@ def run_round(
             reviewer_id=variant_id,
         )
 
-    # Phase 5.5: Flow A gating + attack materialization
-    # (Flow A registration deferred to Task 4; here we just gate.)
+    # Phase 5.5: Flow A gating (decision_proposals).
+    # Only extract proposals for decision IDs that are NOT already registered
+    # (per spec §3.1). If a designer re-emits a proposed_decision for an
+    # already-registered ID (e.g., after crash-recovery), skip it — otherwise
+    # cg.register_decision would raise SchemaError("duplicate id").
+    decisions_json_path = workspace_root / "derived" / "decisions.json"
+    if decisions_json_path.exists():
+        try:
+            existing_ids = set(
+                json.loads(decisions_json_path.read_text()).get("decisions", {}).keys()
+            )
+        except (json.JSONDecodeError, OSError):
+            existing_ids = set()
+    else:
+        existing_ids = set()
+    proposed_payloads = []
+    for c in designer_result.parsed.get("claims", []) or []:
+        pd = c.get("proposed_decision")
+        if not (pd and isinstance(pd, dict)):
+            continue
+        pd_id = pd.get("id")
+        if not isinstance(pd_id, str) or not pd_id:
+            continue   # malformed proposal — silently skip per validator scope
+        if pd_id in existing_ids:
+            continue   # already registered — don't re-propose
+        proposed_payloads.append(pd)
+    approved_proposals: list[dict] = []
+    if proposed_payloads:
+        verdicts_raw = reviewer_result.parsed.get("decision_proposals", []) or []
+        try:
+            verdicts = [cg.DecisionProposalVerdict.from_dict(v)
+                        for v in verdicts_raw]
+            outcome_dict = cg.apply_reviewer_decision_proposals(
+                proposed_payloads, verdicts,
+            )
+        except cg.SchemaError as e:
+            return _reject(
+                action="reviewer-rejected",
+                reason_class="proposal-rejected",
+                failed_phase="reviewer",
+                detail=f"decision_proposals validation failed: {e}",
+                reviewer_id=variant_id,
+            )
+        if outcome_dict["status"] == "any-rejected":
+            rej_lines = [
+                f"{r['proposed_id']}: {r['rationale']}"
+                for r in outcome_dict["rejected"]
+            ]
+            return _reject(
+                action="reviewer-rejected",
+                reason_class="proposal-rejected",
+                failed_phase="reviewer",
+                detail="\n".join(rej_lines),
+                reviewer_id=variant_id,
+            )
+        approved_proposals = outcome_dict["approved"]
+    # Materialize attacks (deferred until after Phase 5.5 gating)
     att_materialized, attack_paths = _materialize_reviewer_attacks(
         workspace_root, variant_id, reviewer_result.parsed,
     )
@@ -546,7 +601,69 @@ def run_round(
             detail="Verifier C disputed claims:\n" + "\n".join(disputed),
         )
 
-    # ---- Phase 7: Flow A + Flow C — deferred to Task 4 ----
+    # ---- Phase 7a: Flow A — register-decision ----
+    if approved_proposals:
+        goal_toml_path = workspace_root / "goal.toml"
+        decisions_json_path = workspace_root / "derived" / "decisions.json"
+        cg.register_decision(
+            goal_toml_path,
+            new_decisions=approved_proposals,
+            decisions_json_path=decisions_json_path,
+        )
+        round_ledger.commit_register_decision(
+            workspace_root,
+            new_decision_ids=[p["id"] for p in approved_proposals],
+        )
+        _log(workspace_root, "commit", round_id=round_id,
+             action="register-decision")
+
+    # ---- Phase 7b: Flow C — apply_canonicalization (high-confidence only) ----
+    canon_proposals = [
+        a for a in reviewer_result.parsed.get("attacks", []) or []
+        if a.get("at_type") == "propose_canonicalization"
+        and a.get("kind") == "position"
+        and a.get("confidence") == "high"
+    ]
+    if canon_proposals:
+        registry_path = (workspace_root / "derived"
+                         / "canonical_slug_registry.json")
+        if registry_path.exists():
+            registry = cg.CanonicalSlugRegistry.from_dict(
+                json.loads(registry_path.read_text()),
+            )
+        else:
+            registry = cg.CanonicalSlugRegistry()
+        all_rewrites: list[dict] = []
+        for at in canon_proposals:
+            entry = registry.data.get(at["scope"])
+            if entry is None or at["to"] not in entry.get("canonical", []):
+                # to_slug not canonical — skip, log, continue
+                _log(workspace_root, "canonicalize_skip",
+                     round_id=round_id,
+                     reject_reason="invalid-canonicalization-target",
+                     scope=at["scope"], from_slug=at["from"], to_slug=at["to"])
+                continue
+            try:
+                rewrites = cg.apply_canonicalization(
+                    variants_root, registry, at["scope"],
+                    from_slug=at["from"], to_slug=at["to"],
+                )
+            except cg.RegistryInvariantError as e:
+                _log(workspace_root, "canonicalize_skip",
+                     round_id=round_id,
+                     reject_reason=str(e),
+                     scope=at["scope"], from_slug=at["from"], to_slug=at["to"])
+                continue
+            all_rewrites.extend(rewrites)
+        if all_rewrites:
+            # Persist updated registry
+            registry_path.parent.mkdir(parents=True, exist_ok=True)
+            registry_path.write_text(json.dumps(
+                registry.to_dict(), indent=2, sort_keys=True,
+            ))
+            round_ledger.commit_canonicalize(workspace_root, all_rewrites)
+            _log(workspace_root, "commit", round_id=round_id,
+                 action="canonicalize")
 
     # ---- Phase 8: Final merge commit ----
     round_ledger.commit_merge(

@@ -565,5 +565,238 @@ class RunRoundFileDiscardTest(unittest.TestCase):
                          "on reviewer rejection")
 
 
+class RunRoundFlowATest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        # Empty decisions.json — bootstrap; designer will propose
+        derived = self.ws / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        (derived / "decisions.json").write_text(json.dumps({
+            "goal_version": "g-01", "decisions": {},
+        }, indent=2))
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_proposal_rejected_via_phase_5_5_verdict_reviewer_rejected_reason_proposal_rejected(self):
+        designer = _designer_ok(claims=[{
+            "id": "cl-000001", "section_id": "circuit-breaker",
+            "decision_id": "circuit-breaker", "claim_type": "decision",
+            "evidence_ids": [], "assertion": "x",
+            "position": "half-open",
+            "proposed_decision": {
+                "id": "circuit-breaker",
+                "question": "When to reset?",
+                "rationale": "needed",
+            },
+        }])
+        reviewer = _reviewer_ok(decision_proposals=[
+            {"proposed_id": "circuit-breaker", "verdict": "reject",
+             "rationale": "off-thesis"},
+        ])
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), designer, reviewer,
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "reviewer-rejected")
+        self.assertEqual(outcome.reason, "proposal-rejected")
+
+    def test_approved_proposal_triggers_register_decision_commit_before_merge(self):
+        designer = _designer_ok(claims=[{
+            "id": "cl-000001", "section_id": "circuit-breaker",
+            "decision_id": "circuit-breaker", "claim_type": "decision",
+            "evidence_ids": [], "assertion": "x",
+            "position": "half-open",
+            "proposed_decision": {
+                "id": "circuit-breaker",
+                "question": "When to reset?",
+                "rationale": "needed for resilience",
+            },
+        }])
+        reviewer = _reviewer_ok(decision_proposals=[
+            {"proposed_id": "circuit-breaker", "verdict": "approve",
+             "rationale": "on-thesis"},
+        ])
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), designer, reviewer, _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "merge")
+        # Inspect git log: register-decision commit precedes merge commit
+        log = subprocess.check_output(
+            ["git", "-C", str(self.ws), "log", "--format=%s|||%B---END---"],
+            text=True,
+        )
+        commit_bodies = log.split("---END---")
+        register_idx = next(
+            (i for i, b in enumerate(commit_bodies)
+             if "Action: register-decision" in b), None,
+        )
+        merge_idx = next(
+            (i for i, b in enumerate(commit_bodies)
+             if "Action: merge" in b), None,
+        )
+        self.assertIsNotNone(register_idx)
+        self.assertIsNotNone(merge_idx)
+        # In git log default ordering (newest first), merge < register
+        self.assertLess(merge_idx, register_idx)
+        # circuit-breaker is now in goal.toml
+        goal_text = (self.ws / "goal.toml").read_text()
+        self.assertIn("circuit-breaker", goal_text)
+
+    def test_designer_reproposing_already_registered_decision_skipped(self):
+        # Seed decisions.json with circuit-breaker already registered
+        derived = self.ws / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        (derived / "decisions.json").write_text(json.dumps({
+            "goal_version": "g-01",
+            "decisions": {
+                "circuit-breaker": {
+                    "id": "circuit-breaker", "question": "?",
+                    "status": "open", "introduced_at": "g-01",
+                },
+            },
+        }, indent=2))
+        # Designer claims an existing decision AND re-emits a proposed_decision
+        # for it. Phase 5.5 should silently skip the proposal, not crash.
+        designer = _designer_ok(claims=[{
+            "id": "cl-000001", "section_id": "circuit-breaker",
+            "decision_id": "circuit-breaker", "claim_type": "decision",
+            "evidence_ids": [], "assertion": "x",
+            "position": "half-open",
+            "proposed_decision": {
+                "id": "circuit-breaker",   # already registered!
+                "question": "When to reset?",
+                "rationale": "needed",
+            },
+        }])
+        # Reviewer doesn't need to send decision_proposals because Phase 5.5
+        # collected zero proposals (filtered out).
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), designer, _reviewer_ok(), _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        # Round should succeed (merge), not crash with SchemaError
+        self.assertEqual(outcome.verdict, "merge")
+        # No register-decision commit should have happened (no new proposals)
+        log = subprocess.check_output(
+            ["git", "-C", str(self.ws), "log", "--format=%B---END---"],
+            text=True,
+        )
+        self.assertNotIn("Action: register-decision", log)
+
+
+class RunRoundFlowCTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        derived = self.ws / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        (derived / "decisions.json").write_text(json.dumps({
+            "goal_version": "g-01",
+            "decisions": {
+                "retry-policy": {
+                    "id": "retry-policy", "question": "?",
+                    "status": "open", "introduced_at": "g-01",
+                },
+            },
+        }, indent=2))
+        # Registry with two canonical positions under retry-policy
+        (derived / "canonical_slug_registry.json").write_text(json.dumps({
+            "retry-policy": {
+                "canonical": ["expo-backoff", "exponential-backoff"],
+                "aliases": {},
+            },
+        }, indent=2))
+        # Pre-existing cl-*.json for v-001 with the from_slug
+        claims_dir = self.ws / "variants" / "nodes" / "v-001" / "claims"
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        (claims_dir / "cl-000001.json").write_text(json.dumps({
+            "id": "cl-000001", "section_id": "retry-policy",
+            "decision_id": "retry-policy", "claim_type": "decision",
+            "evidence_ids": [], "assertion": "x",
+            "position": "exponential-backoff",
+        }, indent=2))
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_high_confidence_canonicalization_triggers_canonicalize_commit_before_merge(self):
+        # Reviewer proposes canonicalizing exponential-backoff → expo-backoff
+        reviewer = _reviewer_ok(attacks=[{
+            "id": "at-000001",
+            "at_type": "propose_canonicalization",
+            "kind": "position", "scope": "retry-policy",
+            "from": "exponential-backoff", "to": "expo-backoff",
+            "confidence": "high", "rationale": "both mean the same",
+        }])
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[]), reviewer, _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000002", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "merge")
+        log = subprocess.check_output(
+            ["git", "-C", str(self.ws), "log", "--format=%s|||%B---END---"],
+            text=True,
+        )
+        commit_bodies = log.split("---END---")
+        canon_idx = next(
+            (i for i, b in enumerate(commit_bodies)
+             if "Action: canonicalize" in b), None,
+        )
+        self.assertIsNotNone(canon_idx,
+                             "expected a canonicalize commit")
+        # The cl-*.json position has been rewritten
+        cl = json.loads(
+            (self.ws / "variants" / "nodes" / "v-001" / "claims"
+             / "cl-000001.json").read_text()
+        )
+        self.assertEqual(cl["position"], "expo-backoff")
+
+    def test_medium_confidence_canonicalization_skipped_for_v0(self):
+        reviewer = _reviewer_ok(attacks=[{
+            "id": "at-000001",
+            "at_type": "propose_canonicalization",
+            "kind": "position", "scope": "retry-policy",
+            "from": "exponential-backoff", "to": "expo-backoff",
+            "confidence": "medium", "rationale": "may be the same",
+        }])
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[]), reviewer, _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000002", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "merge")
+        # NO canonicalize commit — medium-confidence is skipped in v0
+        log = subprocess.check_output(
+            ["git", "-C", str(self.ws), "log", "--format=%B---END---"],
+            text=True,
+        )
+        self.assertNotIn("Action: canonicalize", log)
+        # Original cl-*.json position unchanged
+        cl = json.loads(
+            (self.ws / "variants" / "nodes" / "v-001" / "claims"
+             / "cl-000001.json").read_text()
+        )
+        self.assertEqual(cl["position"], "exponential-backoff")
+
+
 if __name__ == "__main__":
     unittest.main()
