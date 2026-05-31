@@ -165,18 +165,27 @@ def commit_merge(
     claim_paths: list[str],
     attack_paths: list[str],
     evidence_paths: list[str],
+    score_delta: str | None = None,
+    scorecard_path: str | None = None,
 ) -> None:
-    """Stage all materialized files + actions.jsonl, commit with
-    Action: merge + Variant + Round trailers."""
+    """Stage all materialized files + actions.jsonl (+ scorecard.json when
+    given), commit with Action: merge + Variant + Round (+ Score-Delta when
+    given) trailers."""
     all_paths = list(section_paths) + list(claim_paths) + \
                 list(attack_paths) + list(evidence_paths)
+    if scorecard_path is not None:
+        all_paths.append(scorecard_path)
     _git_add(workspace_root, *all_paths, "actions.jsonl")
-    message = (
-        f"feat(harness): {round_id} {variant_id}\n\n"
-        "Action: merge\n"
-        f"Variant: {variant_id}\n"
-        f"Round: {round_id}\n"
-    )
+    lines = [
+        f"feat(harness): {round_id} {variant_id}",
+        "",
+        "Action: merge",
+        f"Variant: {variant_id}",
+        f"Round: {round_id}",
+    ]
+    if score_delta is not None:
+        lines.append(f"Score-Delta: {score_delta}")
+    message = "\n".join(lines) + "\n"
     _git_commit(workspace_root, message)
 
 
@@ -188,6 +197,7 @@ _ALLOWED_REASONS = frozenset({
     "uncited-claim", "cross-field-fail", "vacuous-position",
     "proposal-rejected", "scope-violation", "immutability-violation",
     "phantom-claim", "dangling-evidence", "silent-goal-toml-edit",
+    "score-regression",
 })
 
 

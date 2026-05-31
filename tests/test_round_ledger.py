@@ -211,5 +211,63 @@ class CommitHelpersTest(unittest.TestCase):
         self.assertIn("Reviewer: v-002", msg)
 
 
+class CommitMergeScoreDeltaTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        (self.ws / "actions.jsonl").write_text('{"event": "init"}\n')
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _make_section(self):
+        doc = self.ws / "variants" / "nodes" / "v-001" / "doc" / "01-x.md"
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text('+++\nsection_id = "x"\n+++\n## X\nbody\n')
+        return "variants/nodes/v-001/doc/01-x.md"
+
+    def _last_commit_msg(self):
+        return subprocess.check_output(
+            ["git", "-C", str(self.ws), "log", "-1", "--format=%B"]
+        ).decode()
+
+    def test_score_delta_appended_when_provided(self):
+        sec = self._make_section()
+        round_ledger.commit_merge(
+            self.ws, round_id="round-000002", variant_id="v-001",
+            section_paths=[sec], claim_paths=[], attack_paths=[],
+            evidence_paths=[],
+            score_delta="groundedness=+0.04 completeness=-0.01",
+        )
+        msg = self._last_commit_msg()
+        self.assertIn("Score-Delta: groundedness=+0.04 completeness=-0.01", msg)
+
+    def test_no_score_delta_trailer_when_none(self):
+        sec = self._make_section()
+        round_ledger.commit_merge(
+            self.ws, round_id="round-000002", variant_id="v-001",
+            section_paths=[sec], claim_paths=[], attack_paths=[],
+            evidence_paths=[], score_delta=None,
+        )
+        self.assertNotIn("Score-Delta", self._last_commit_msg())
+
+    def test_scorecard_path_staged_when_provided(self):
+        sec = self._make_section()
+        sc = self.ws / "variants" / "nodes" / "v-001" / "scorecard.json"
+        sc.write_text('{"variant": "v-001"}')
+        round_ledger.commit_merge(
+            self.ws, round_id="round-000002", variant_id="v-001",
+            section_paths=[sec], claim_paths=[], attack_paths=[],
+            evidence_paths=[], score_delta="groundedness=+0.01",
+            scorecard_path="variants/nodes/v-001/scorecard.json",
+        )
+        tracked = subprocess.check_output(
+            ["git", "-C", str(self.ws), "ls-files",
+             "variants/nodes/v-001/scorecard.json"]
+        ).decode().strip()
+        self.assertEqual(tracked, "variants/nodes/v-001/scorecard.json")
+
+
 if __name__ == "__main__":
     unittest.main()
