@@ -87,9 +87,10 @@ def _load_goal_meta(workspace_root: Path) -> tuple[str, str]:
     return (g.get("title", ""), g.get("description", ""))
 
 
-def _render_goal_and_pointers(workspace_root: Path, title: str,
-                              description: str, pointers: list[str]) -> str:
-    lines = ["## Goal", "", f"**{title}**", "", description, "",
+def _render_goal_and_pointers(title: str, description: str,
+                              pointers: list[str]) -> str:
+    desc_block = [description, ""] if description else []
+    lines = ["## Goal", "", f"**{title}**", "", *desc_block,
              "## Read these first (on disk)", "",
              "Read every path below before answering; the summary tables are "
              "an index, not a substitute for the source.", ""]
@@ -237,7 +238,7 @@ def build_designer_context(workspace_root: Path, round_id: str,
     out = [_header("designer", round_id, variant_id, goal_version), ""]
     title, description = _load_goal_meta(workspace_root)
     out.append(_render_goal_and_pointers(
-        workspace_root, title, description, [
+        title, description, [
             "goal.toml",
             f"variants/nodes/{variant_id}/doc/",
             f"rounds/{round_id}/scratch/planner.json",
@@ -333,7 +334,7 @@ def build_reviewer_context(workspace_root: Path, round_id: str,
     out = [_header("reviewer", round_id, variant_id, goal_version), ""]
     title, description = _load_goal_meta(workspace_root)
     out.append(_render_goal_and_pointers(
-        workspace_root, title, description, [
+        title, description, [
             f"rounds/{round_id}/patch.diff",
             "evidence/",
             f"variants/nodes/{variant_id}/doc/",
@@ -425,7 +426,7 @@ def build_verifier_c_context(workspace_root: Path, round_id: str,
     title, description = _load_goal_meta(workspace_root)
     out = [_header("verifier_c", round_id, variant_id, goal_version), ""]
     out.append(_render_goal_and_pointers(
-        workspace_root, title, description, [
+        title, description, [
             f"rounds/{round_id}/patch.diff",
             "evidence/",
         ]))

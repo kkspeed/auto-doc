@@ -319,6 +319,8 @@ class ContextPointersTest(unittest.TestCase):
         self.assertIn("Read these first", out)
         self.assertIn("goal.toml", out)
         self.assertIn("variants/nodes/v-001/doc/", out)
+        self.assertIn("rounds/round-000001/scratch/planner.json", out)
+        self.assertIn("evidence/", out)
         self.assertIn("test", out)  # goal title
 
     def test_verifier_c_context_points_at_patch_and_evidence(self):
