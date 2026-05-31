@@ -87,6 +87,13 @@ class WorkspaceTemplateHarnessTomlTest(unittest.TestCase):
                   "bootstrap_registry_size_threshold"):
             self.assertIn(k, data["claim_graph"], f"claim_graph.{k} missing")
 
+    def test_scorecard_table_has_regression_tolerance(self):
+        path = TEMPLATE_DIR / "harness.toml"
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+        self.assertIn("scorecard", data)
+        self.assertEqual(data["scorecard"]["regression_tolerance"], 0.05)
+
 
 class WorkspaceTemplateSeedDocTest(unittest.TestCase):
     def test_seed_doc_exists(self):

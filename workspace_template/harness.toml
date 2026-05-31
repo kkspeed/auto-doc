@@ -40,3 +40,9 @@ spawn_timeout_seconds = 300       # per CLI spawn; round fails with reason: spaw
 # Claim graph thresholds (see harness/claim_graph.py).
 stale_proposals_threshold_rounds = 5    # proposed decisions older than N rounds surface as stale
 bootstrap_registry_size_threshold = 5   # reviewer permissive on new-decision proposals when registry has fewer entries
+
+
+[scorecard]
+# Merge gate: a round must improve >=1 dimension and may not drop any dimension
+# by more than this tolerance below its prior value. See harness/scorecard.py.
+regression_tolerance = 0.05
