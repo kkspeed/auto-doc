@@ -1,6 +1,10 @@
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
 from harness import claim_graph as cg
+from harness import morning_brief
 
 
 class RenderPositionCollisionsTableTest(unittest.TestCase):
@@ -188,6 +192,52 @@ class RenderCanonicalizationsAppliedTest(unittest.TestCase):
             "kind": "attack", "paths": [],
         }])
         self.assertIn("(none)", out)
+
+
+class RenderMorningBriefTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        self.ws.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_empty_workspace_renders_all_section_headers(self):
+        out = morning_brief.render_morning_brief(self.ws, since_sha=None)
+        self.assertIn("# Morning brief", out)
+        self.assertIn("## Position collisions", out)
+        self.assertIn("## Decisional asymmetry", out)
+        self.assertIn("## Pending registry changes", out)
+        self.assertIn("## Canonicalizations applied", out)
+        self.assertIn("## Stale proposals", out)
+        self.assertIn("## Score trajectory", out)
+        self.assertIn("## Still weak", out)
+        self.assertIn("## Rejected this run", out)
+        self.assertIn("## What I'd ask you to look at first", out)
+
+    def test_sections_in_spec_order(self):
+        out = morning_brief.render_morning_brief(self.ws, since_sha=None)
+        order = ["## Position collisions", "## Decisional asymmetry",
+                 "## Pending registry changes", "## Canonicalizations applied",
+                 "## Stale proposals", "## Score trajectory", "## Still weak",
+                 "## Rejected this run", "## What I'd ask you to look at first"]
+        positions = [out.index(h) for h in order]
+        self.assertEqual(positions, sorted(positions))
+
+
+class StillWeakSectionTest(unittest.TestCase):
+    def test_weak_verdicts_rendered(self):
+        out = morning_brief.render_still_weak([
+            {"claim_id": "cl-000001", "rationale": "thin evidence"},
+        ])
+        self.assertIn("## Still weak", out)
+        self.assertIn("cl-000001", out)
+        self.assertIn("thin evidence", out)
+
+    def test_empty_still_weak_friendly_state(self):
+        out = morning_brief.render_still_weak([])
+        self.assertIn("No claims flagged weak", out)
 
 
 if __name__ == "__main__":
