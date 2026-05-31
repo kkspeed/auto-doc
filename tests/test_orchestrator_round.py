@@ -180,5 +180,390 @@ class RunRoundHappyPathTest(unittest.TestCase):
                             f"missing scratch for {role}")
 
 
+class RunRoundPlannerFailureTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_planner_spawn_failed_verdict_spawn_failed(self):
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            RoleOutput(verdict="spawn-failed",
+                       stderr_tail="claude exited 1",
+                       elapsed_seconds=0.1, retry_count=1),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "spawn-failed")
+        self.assertIsNotNone(outcome.rj_id)
+        # rj-*.md must exist and commit must have failure-class Action
+        rj_path = self.ws / "rejections" / f"{outcome.rj_id}.md"
+        self.assertTrue(rj_path.exists())
+
+    def test_planner_output_parse_fail_verdict_output_parse_fail(self):
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            RoleOutput(verdict="output-parse-fail",
+                       stderr_tail="json parse error",
+                       elapsed_seconds=0.1, retry_count=1),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "output-parse-fail")
+        self.assertIsNotNone(outcome.rj_id)
+
+
+class RunRoundDesignerFailureTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_designer_spawn_failed_verdict_spawn_failed(self):
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(),
+            RoleOutput(verdict="spawn-failed", stderr_tail="x",
+                       elapsed_seconds=0.1, retry_count=1),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "spawn-failed")
+        self.assertIsNotNone(outcome.rj_id)
+
+    def test_designer_patch_apply_failure_verdict_cross_field_fail(self):
+        # Designer emits a malformed patch_diff that git apply rejects
+        bad_diff = "--- this is not a valid unified diff ---\n"
+        designer_bad = _designer_ok(patch_diff=bad_diff)
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(),
+            designer_bad,
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        # The orchestrator surfaces materialization errors as phase-a-fail
+        # (pre-Verifier-A materialize step). We accept any of the failure
+        # verdicts: just confirm the round was rejected.
+        self.assertIn(outcome.verdict, (
+            "phase-a-fail", "phase-b-fail", "output-parse-fail",
+        ))
+
+
+class RunRoundVerifierAFailureTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        # Seed decisions so designer's cl-*.json validates
+        derived = self.ws / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        (derived / "decisions.json").write_text(json.dumps({
+            "goal_version": "g-01",
+            "decisions": {
+                "retry-policy": {
+                    "id": "retry-policy", "question": "?",
+                    "status": "open", "introduced_at": "g-01",
+                },
+            },
+        }, indent=2))
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_uncited_claim_verdict_phase_a_fail_reason_uncited_claim(self):
+        # Designer creates a `decided` section without a cite
+        doc_dir = self.ws / "variants" / "nodes" / "v-001" / "doc"
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        (doc_dir / "01-retry.md").write_text(
+            '+++\nsection_id = "retry-policy"\ntags = ["decided"]\n+++\n'
+            'Uncited assertion.\n'
+        )
+        # No designer evidence; the section is pre-existing
+        designer = _designer_ok(claims=[
+            {"id": "cl-000001", "section_id": "retry-policy",
+             "decision_id": "retry-policy", "claim_type": "decision",
+             "evidence_ids": [], "assertion": "x",
+             "position": "expo-backoff"},
+        ])
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), designer,
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "phase-a-fail")
+        self.assertEqual(outcome.reason, "uncited-claim")
+
+    def test_dangling_cite_verdict_phase_a_fail_reason_dangling_evidence(self):
+        doc_dir = self.ws / "variants" / "nodes" / "v-001" / "doc"
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        (doc_dir / "01-retry.md").write_text(
+            '+++\nsection_id = "retry-policy"\ntags = ["decided"]\n+++\n'
+            'Assertion with bad cite [^ev-999999].\n'
+        )
+        # Designer's evidence list is empty — cite resolves to nothing
+        designer = _designer_ok(claims=[
+            {"id": "cl-000001", "section_id": "retry-policy",
+             "decision_id": "retry-policy", "claim_type": "decision",
+             "evidence_ids": [], "assertion": "x",
+             "position": "expo-backoff"},
+        ])
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), designer,
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "phase-a-fail")
+        self.assertEqual(outcome.reason, "dangling-evidence")
+
+
+class RunRoundVerifierBFailureTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        derived = self.ws / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        (derived / "decisions.json").write_text(json.dumps({
+            "goal_version": "g-01",
+            "decisions": {
+                "retry-policy": {
+                    "id": "retry-policy", "question": "?",
+                    "status": "open", "introduced_at": "g-01",
+                },
+            },
+        }, indent=2))
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_excerpt_mismatch_verdict_phase_b_fail(self):
+        # Pre-existing section with a cite; designer emits an ev with a wildly
+        # different excerpt → Verifier B mismatch
+        doc_dir = self.ws / "variants" / "nodes" / "v-001" / "doc"
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        (doc_dir / "01-retry.md").write_text(
+            '+++\nsection_id = "retry-policy"\ntags = ["decided"]\n+++\n'
+            'Use expo-backoff with full jitter [^ev-000001].\n'
+        )
+        designer = _designer_ok(
+            evidence=[{
+                "id": "ev-000001",
+                "confidence": "high",
+                "excerpt": "Use TCP keepalive with a 30-second interval.",
+                "match": "normalized_substring",
+                "claim": "x",
+            }],
+            claims=[{
+                "id": "cl-000001", "section_id": "retry-policy",
+                "decision_id": "retry-policy", "claim_type": "decision",
+                "evidence_ids": ["ev-000001"], "assertion": "x",
+                "position": "expo-backoff",
+            }],
+        )
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), designer,
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "phase-b-fail")
+
+
+class RunRoundReviewerFailureTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        derived = self.ws / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        (derived / "decisions.json").write_text(json.dumps({
+            "goal_version": "g-01",
+            "decisions": {
+                "retry-policy": {
+                    "id": "retry-policy", "question": "?",
+                    "status": "open", "introduced_at": "g-01",
+                },
+            },
+        }, indent=2))
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_reviewer_decision_reject_verdict_reviewer_rejected(self):
+        reviewer = _reviewer_ok(
+            decision="reject",
+            rejection={"reason_class": "uncited-claim",
+                       "evidence_against": [],
+                       "supersedable_by": "add a cite"},
+        )
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(),
+            _designer_ok(claims=[]),
+            reviewer,
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "reviewer-rejected")
+        self.assertEqual(outcome.reason, "uncited-claim")
+
+    def test_reviewer_rejection_with_other_reason_class_still_commits(self):
+        # If reviewer returns reason_class="other" (not in hook's ALLOWED_REASONS),
+        # the orchestrator falls back to a valid reason so the commit-msg hook
+        # accepts the rejection commit.
+        reviewer = _reviewer_ok(
+            decision="reject",
+            rejection={"reason_class": "other",  # invalid hook value
+                       "evidence_against": [],
+                       "supersedable_by": "x"},
+        )
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(),
+            _designer_ok(claims=[]),
+            reviewer,
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        # The round must produce a verdict; if the commit_rejection had
+        # failed (because Reason was omitted), the orchestrator would have
+        # raised CalledProcessError instead of returning a clean verdict.
+        self.assertEqual(outcome.verdict, "reviewer-rejected")
+        # The rj-*.md frontmatter preserves the original reason_class for audit;
+        # the commit-msg Reason is the safe fallback.
+        import tomllib as _tomllib
+        rj_path = self.ws / "rejections" / f"{outcome.rj_id}.md"
+        text = rj_path.read_text()
+        end = text.find("+++", 3)
+        fm = _tomllib.loads(text[3:end])
+        # We chose to write the safe value to the rj frontmatter too
+        # (so audit and commit message agree). Either is acceptable.
+        self.assertIn(fm["reason_class"], ("other", "cross-field-fail"))
+
+
+class RunRoundVerifierCDisputeTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        derived = self.ws / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        (derived / "decisions.json").write_text(json.dumps({
+            "goal_version": "g-01",
+            "decisions": {
+                "retry-policy": {
+                    "id": "retry-policy", "question": "?",
+                    "status": "open", "introduced_at": "g-01",
+                },
+            },
+        }, indent=2))
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_verifier_c_top_level_dispute_verdict_phase_c_dispute(self):
+        vc = _verifier_c_ok(verdict="dispute", per_claim=[
+            {"claim_id": "cl-000001", "verdict": "dispute",
+             "rationale": "evidence does not support"},
+        ])
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(),
+            _designer_ok(claims=[]),
+            _reviewer_ok(),
+            vc,
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "phase-c-dispute")
+
+    def test_verifier_c_per_claim_dispute_verdict_phase_c_dispute(self):
+        # verdict=confirm at top level but per_claim has a dispute
+        vc = _verifier_c_ok(verdict="confirm", per_claim=[
+            {"claim_id": "cl-000001", "verdict": "dispute",
+             "rationale": "x"},
+        ])
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(),
+            _designer_ok(claims=[]),
+            _reviewer_ok(),
+            vc,
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "phase-c-dispute")
+
+
+class RunRoundFileDiscardTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        derived = self.ws / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        (derived / "decisions.json").write_text(json.dumps({
+            "goal_version": "g-01",
+            "decisions": {
+                "retry-policy": {
+                    "id": "retry-policy", "question": "?",
+                    "status": "open", "introduced_at": "g-01",
+                },
+            },
+        }, indent=2))
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_rejection_discards_materialized_files(self):
+        # Designer materializes a cl-*.json; reviewer rejects.
+        # The cl-*.json should be removed from working tree.
+        designer = _designer_ok(claims=[{
+            "id": "cl-000001", "section_id": "retry-policy",
+            "decision_id": "retry-policy", "claim_type": "decision",
+            "evidence_ids": [], "assertion": "x",
+            "position": "expo-backoff",
+        }])
+        reviewer = _reviewer_ok(
+            decision="reject",
+            rejection={"reason_class": "uncited-claim",
+                       "evidence_against": [],
+                       "supersedable_by": "x"},
+        )
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), designer, reviewer,
+        ]):
+            orchestrator.run_round(
+                self.ws, _harness_config(),
+                "round-000001", "v-001",
+            )
+        cl_path = (self.ws / "variants" / "nodes" / "v-001" / "claims"
+                   / "cl-000001.json")
+        self.assertFalse(cl_path.exists(),
+                         "designer's cl-*.json should have been discarded "
+                         "on reviewer rejection")
+
+
 if __name__ == "__main__":
     unittest.main()

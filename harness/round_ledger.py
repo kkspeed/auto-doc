@@ -180,6 +180,17 @@ def commit_merge(
     _git_commit(workspace_root, message)
 
 
+# Closed-vocab Reason values accepted by the commit-msg hook.
+# Actions "spawn-failed" and "output-parse-fail" do NOT require a Reason
+# trailer per TRAILER_REQUIREMENTS; including an invalid Reason would fail
+# the hook. We omit the Reason trailer when the value isn't in this set.
+_ALLOWED_REASONS = frozenset({
+    "uncited-claim", "cross-field-fail", "vacuous-position",
+    "proposal-rejected", "scope-violation", "immutability-violation",
+    "phantom-claim", "dangling-evidence", "silent-goal-toml-edit",
+})
+
+
 def commit_rejection(
     workspace_root: Path,
     action: str,
@@ -190,8 +201,8 @@ def commit_rejection(
     reviewer_id: str | None = None,
 ) -> None:
     """Stage rejections/<rj_id>.md + actions.jsonl, commit with the
-    failure-class Action trailer + Variant + Round + Reason + Reviewer
-    (when applicable)."""
+    failure-class Action trailer + Variant + Round + Reason (when the
+    reason is a valid hook-allowed value) + Reviewer (when applicable)."""
     _git_add(
         workspace_root,
         f"rejections/{rj_id}.md", "actions.jsonl",
@@ -202,8 +213,12 @@ def commit_rejection(
         f"Action: {action}",
         f"Variant: {variant_id}",
         f"Round: {round_id}",
-        f"Reason: {reason}",
     ]
+    # Only include the Reason trailer when it's a valid hook-allowed value.
+    # "spawn-failed" and "output-parse-fail" are action names, not reasons,
+    # and those actions don't require a Reason trailer per TRAILER_REQUIREMENTS.
+    if reason in _ALLOWED_REASONS:
+        lines.append(f"Reason: {reason}")
     if reviewer_id is not None:
         lines.append(f"Reviewer: {reviewer_id}")
     message = "\n".join(lines) + "\n"

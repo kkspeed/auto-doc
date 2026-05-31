@@ -22,6 +22,7 @@ from harness import claim_graph as cg
 from harness import context as context_mod
 from harness import round_ledger
 from harness import verifiers
+from harness.round_ledger import _ALLOWED_REASONS
 from harness.spawn import RoleOutput, spawn_role
 
 
@@ -281,11 +282,42 @@ def run_round(
     round_id: str,
     variant_id: str,
 ) -> RoundOutcome:
-    """Execute one round on one variant. Happy-path-only in Task 2; failure
-    branches and Flow A/C land in Tasks 3 and 4."""
+    """Execute one round on one variant. Linear flow with early returns
+    on rejection paths. See spec §3.1 for full phase semantics."""
     start_ts = time.monotonic()
     spawn_counts: dict[str, int] = {}
-    _log(workspace_root, "round_start", round_id=round_id, variant_id=variant_id)
+    materialized: list[Path] = []
+    _log(workspace_root, "round_start",
+         round_id=round_id, variant_id=variant_id)
+
+    variants_root = workspace_root / "variants" / "nodes"
+    evidence_root = workspace_root / "evidence"
+
+    def _reject(action: str, reason_class: str, failed_phase: str,
+                detail: str, reviewer_id: str | None = None) -> RoundOutcome:
+        _discard_materialized(workspace_root, materialized)
+        rj_id = round_ledger.write_rejection(
+            workspace_root, round_id, variant_id,
+            reason_class=reason_class, failed_phase=failed_phase,
+            detail=detail, reviewer_id=reviewer_id,
+        )
+        _log(workspace_root, "rejection",
+             round_id=round_id, rj_id=rj_id,
+             reason_class=reason_class, failed_phase=failed_phase)
+        round_ledger.commit_rejection(
+            workspace_root, action=action,
+            round_id=round_id, variant_id=variant_id,
+            rj_id=rj_id, reason=reason_class, reviewer_id=reviewer_id,
+        )
+        _log(workspace_root, "commit", round_id=round_id, action=action)
+        _log(workspace_root, "round_end",
+             round_id=round_id, verdict=action)
+        return RoundOutcome(
+            round_id=round_id, variant_id=variant_id,
+            verdict=action, reason=reason_class, rj_id=rj_id,
+            elapsed_seconds=time.monotonic() - start_ts,
+            spawn_counts=spawn_counts,
+        )
 
     # ---- Phase 1: Planner ----
     planner_ctx = context_mod.build_planner_context(
@@ -300,11 +332,11 @@ def run_round(
     )
     spawn_counts["planner"] = 1 + planner_result.retry_count
     if planner_result.verdict != "ok":
-        return RoundOutcome(
-            round_id=round_id, variant_id=variant_id,
-            verdict=planner_result.verdict,
-            elapsed_seconds=time.monotonic() - start_ts,
-            spawn_counts=spawn_counts,
+        return _reject(
+            action=planner_result.verdict,
+            reason_class=planner_result.verdict,
+            failed_phase="planner",
+            detail=f"planner: {planner_result.stderr_tail or planner_result.verdict}",
         )
     round_ledger.write_role_scratch(
         workspace_root, round_id, "planner", planner_result.parsed,
@@ -328,11 +360,11 @@ def run_round(
     )
     spawn_counts["designer"] = 1 + designer_result.retry_count
     if designer_result.verdict != "ok":
-        return RoundOutcome(
-            round_id=round_id, variant_id=variant_id,
-            verdict=designer_result.verdict,
-            elapsed_seconds=time.monotonic() - start_ts,
-            spawn_counts=spawn_counts,
+        return _reject(
+            action=designer_result.verdict,
+            reason_class=designer_result.verdict,
+            failed_phase="designer",
+            detail=f"designer: {designer_result.stderr_tail or designer_result.verdict}",
         )
     round_ledger.write_role_scratch(
         workspace_root, round_id, "designer", designer_result.parsed,
@@ -342,9 +374,17 @@ def run_round(
          verdict=designer_result.verdict,
          retry_count=designer_result.retry_count,
          elapsed_seconds=designer_result.elapsed_seconds)
-    materialized, section_paths, claim_paths, _att_unused, evidence_paths = \
-        _materialize_designer_output(
-            workspace_root, variant_id, designer_result.parsed,
+    try:
+        materialized, section_paths, claim_paths, _att_unused, evidence_paths = \
+            _materialize_designer_output(
+                workspace_root, variant_id, designer_result.parsed,
+            )
+    except RuntimeError as e:
+        return _reject(
+            action="phase-a-fail",
+            reason_class="cross-field-fail",
+            failed_phase="designer",
+            detail=f"materialize failure: {e}",
         )
     _log(workspace_root, "materialize",
          round_id=round_id,
@@ -353,7 +393,56 @@ def run_round(
          attack_count=0,
          section_count=len(section_paths))
 
-    # ---- Phase 5: Reviewer (Phases 3-4 verifiers added in Task 3) ----
+    # ---- Phase 3: Verifier A (cite enforcement) ----
+    r_completeness = verifiers.verify_citation_completeness(variants_root)
+    r_resolution = verifiers.verify_cite_resolution(
+        variants_root, evidence_root,
+    )
+    failure_count_a = len(r_completeness.failures) + len(r_resolution.failures)
+    _log(workspace_root, "verifier_complete",
+         round_id=round_id, verifier="a",
+         failure_count=failure_count_a,
+         verdict="pass" if failure_count_a == 0 else "fail")
+    if failure_count_a > 0:
+        if r_completeness.failures:
+            reason = "uncited-claim"
+            failures = r_completeness.failures
+        else:
+            reason = "dangling-evidence"
+            failures = r_resolution.failures
+        detail_lines = [
+            f"{f.variant} {f.section_path}: {f.detail}"
+            for f in failures[:20]
+        ]
+        return _reject(
+            action="phase-a-fail",
+            reason_class=reason,
+            failed_phase="verifier_a",
+            detail="\n".join(detail_lines),
+        )
+
+    # ---- Phase 4: Verifier B (excerpt match) ----
+    r_excerpt = verifiers.verify_excerpt_match(
+        variants_root, evidence_root, threshold=0.92,
+    )
+    failure_count_b = len(r_excerpt.failures)
+    _log(workspace_root, "verifier_complete",
+         round_id=round_id, verifier="b",
+         failure_count=failure_count_b,
+         verdict="pass" if failure_count_b == 0 else "fail")
+    if failure_count_b > 0:
+        detail_lines = [
+            f"{f.variant} {f.section_path}: {f.detail}\n{f.excerpt_diff or ''}"
+            for f in r_excerpt.failures[:10]
+        ]
+        return _reject(
+            action="phase-b-fail",
+            reason_class="cross-field-fail",
+            failed_phase="verifier_b",
+            detail="\n\n".join(detail_lines),
+        )
+
+    # ---- Phase 5: Reviewer ----
     reviewer_ctx = context_mod.build_reviewer_context(
         workspace_root, round_id, variant_id,
     )
@@ -366,11 +455,11 @@ def run_round(
     )
     spawn_counts["reviewer"] = 1 + reviewer_result.retry_count
     if reviewer_result.verdict != "ok":
-        return RoundOutcome(
-            round_id=round_id, variant_id=variant_id,
-            verdict=reviewer_result.verdict,
-            elapsed_seconds=time.monotonic() - start_ts,
-            spawn_counts=spawn_counts,
+        return _reject(
+            action=reviewer_result.verdict,
+            reason_class=reviewer_result.verdict,
+            failed_phase="reviewer",
+            detail=f"reviewer: {reviewer_result.stderr_tail or reviewer_result.verdict}",
         )
     round_ledger.write_role_scratch(
         workspace_root, round_id, "reviewer", reviewer_result.parsed,
@@ -380,6 +469,32 @@ def run_round(
          verdict=reviewer_result.verdict,
          retry_count=reviewer_result.retry_count,
          elapsed_seconds=reviewer_result.elapsed_seconds)
+
+    if reviewer_result.parsed.get("decision") == "reject":
+        rej = reviewer_result.parsed.get("rejection") or {}
+        # Fallback to "cross-field-fail" if reviewer omits reason_class or uses
+        # a value not in the commit-msg hook's ALLOWED_REASONS — Reason is
+        # REQUIRED for the reviewer-rejected action and must pass the hook's
+        # closed-vocab check. "cross-field-fail" is a generic catch-all.
+        raw_reason = rej.get("reason_class")
+        reason_class = (
+            raw_reason if raw_reason in _ALLOWED_REASONS
+            else "cross-field-fail"
+        )
+        detail = (
+            f"reviewer rejected: {reviewer_result.parsed.get('rationale', '')}\n"
+            f"supersedable_by: {rej.get('supersedable_by', '')}"
+        )
+        return _reject(
+            action="reviewer-rejected",
+            reason_class=reason_class,
+            failed_phase="reviewer",
+            detail=detail,
+            reviewer_id=variant_id,
+        )
+
+    # Phase 5.5: Flow A gating + attack materialization
+    # (Flow A registration deferred to Task 4; here we just gate.)
     att_materialized, attack_paths = _materialize_reviewer_attacks(
         workspace_root, variant_id, reviewer_result.parsed,
     )
@@ -398,11 +513,11 @@ def run_round(
     )
     spawn_counts["verifier_c"] = 1 + vc_result.retry_count
     if vc_result.verdict != "ok":
-        return RoundOutcome(
-            round_id=round_id, variant_id=variant_id,
-            verdict=vc_result.verdict,
-            elapsed_seconds=time.monotonic() - start_ts,
-            spawn_counts=spawn_counts,
+        return _reject(
+            action=vc_result.verdict,
+            reason_class=vc_result.verdict,
+            failed_phase="verifier_c",
+            detail=f"verifier_c: {vc_result.stderr_tail or vc_result.verdict}",
         )
     round_ledger.write_role_scratch(
         workspace_root, round_id, "verifier_c", vc_result.parsed,
@@ -412,6 +527,26 @@ def run_round(
          verdict=vc_result.verdict,
          retry_count=vc_result.retry_count,
          elapsed_seconds=vc_result.elapsed_seconds)
+
+    vc_parsed = vc_result.parsed
+    has_per_claim_dispute = any(
+        pc.get("verdict") == "dispute"
+        for pc in vc_parsed.get("per_claim", [])
+    )
+    if vc_parsed.get("verdict") == "dispute" or has_per_claim_dispute:
+        disputed = [
+            f"{pc.get('claim_id', '?')}: {pc.get('rationale', '?')}"
+            for pc in vc_parsed.get("per_claim", [])
+            if pc.get("verdict") == "dispute"
+        ]
+        return _reject(
+            action="phase-c-dispute",
+            reason_class="cross-field-fail",
+            failed_phase="verifier_c",
+            detail="Verifier C disputed claims:\n" + "\n".join(disputed),
+        )
+
+    # ---- Phase 7: Flow A + Flow C — deferred to Task 4 ----
 
     # ---- Phase 8: Final merge commit ----
     round_ledger.commit_merge(
