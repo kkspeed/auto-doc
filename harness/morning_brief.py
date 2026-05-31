@@ -75,6 +75,7 @@ def render_rejected_this_run(by_reason: dict) -> str:
 
 
 def render_look_at_first(items: list[str]) -> str:
+    """items: list of freeform strings, one bullet per item."""
     if not items:
         return ("## What I'd ask you to look at first\n\n"
                 "Nothing urgent - the run was clean.\n")
@@ -91,7 +92,8 @@ def render_look_at_first(items: list[str]) -> str:
 def _gather_trajectory(messages: list[str]) -> list[dict]:
     rows = []
     for msg in reversed(messages):  # oldest first
-        if "Action: merge" not in msg:
+        action_m = _ACTION_RE.search(msg)
+        if not action_m or action_m.group(1) != "merge":
             continue
         sd = _SCORE_DELTA_RE.search(msg)
         rnd = _ROUND_RE.search(msg)

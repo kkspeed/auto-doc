@@ -240,5 +240,35 @@ class StillWeakSectionTest(unittest.TestCase):
         self.assertIn("No claims flagged weak", out)
 
 
+class GatherTrajectoryTest(unittest.TestCase):
+    def test_parses_merge_commit_round_and_variant(self):
+        messages = ["Round: round-000001\nVariant: v-001\nAction: merge\n"]
+        rows = morning_brief._gather_trajectory(messages)
+        self.assertEqual(rows[0]["round"], "round-000001")
+        self.assertEqual(rows[0]["variant"], "v-001")
+        self.assertEqual(rows[0]["score_delta"], "(baseline)")
+
+    def test_merge_with_score_delta_captured(self):
+        messages = ["Round: round-000002\nVariant: v-001\nAction: merge\n"
+                    "Score-Delta: groundedness=+0.04\n"]
+        rows = morning_brief._gather_trajectory(messages)
+        self.assertEqual(rows[0]["score_delta"], "groundedness=+0.04")
+
+    def test_non_merge_excluded(self):
+        messages = ["Action: reviewer-rejected\nReason: cross-field-fail\n"]
+        self.assertEqual(morning_brief._gather_trajectory(messages), [])
+
+
+class GatherRejectedTest(unittest.TestCase):
+    def test_score_regression_counted_by_reason(self):
+        messages = ["Action: score-regression\nReason: score-regression\n"]
+        r = morning_brief._gather_rejected(messages)
+        self.assertEqual(r.get("score-regression"), 1)
+
+    def test_merge_not_counted_as_rejection(self):
+        messages = ["Action: merge\nRound: round-000001\nVariant: v-001\n"]
+        self.assertEqual(morning_brief._gather_rejected(messages), {})
+
+
 if __name__ == "__main__":
     unittest.main()
