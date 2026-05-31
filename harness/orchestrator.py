@@ -175,7 +175,10 @@ DESIGNER_PROMPT = (
     "You are the designer. Read the CONTEXT.md above and emit JSON with "
     "fields: round, variant, patch_diff (unified-diff text or empty string), "
     "evidence (list of {id, confidence, citations, claim, excerpt, ...}), "
-    "claims (list of cl-*.json dicts). Output ONLY valid JSON."
+    "claims (list of cl-*.json dicts). "
+    "Before answering, read every path listed under 'Read these first (on "
+    "disk)' in the CONTEXT above; do not rely on the summary tables alone. "
+    "Output ONLY valid JSON."
 )
 
 REVIEWER_PROMPT = (
@@ -188,6 +191,8 @@ REVIEWER_PROMPT = (
     "Also emit goal_alignment (float in [0,1]) scoring how well this round's "
     "doc serves the stated goal, and technical_correctness (float in [0,1]) "
     "scoring how technically correct the cited claims are. "
+    "Before answering, read every path listed under 'Read these first (on "
+    "disk)' in the CONTEXT above; do not rely on the summary tables alone. "
     "Output ONLY valid JSON."
 )
 
@@ -196,7 +201,10 @@ VERIFIER_C_PROMPT = (
     "cited evidence; emit JSON with fields: round, variant, verdict "
     "(confirm|dispute), per_claim (list of {claim_id, verdict (confirm|"
     "weak|dispute), rationale}), candidate_collisions_confirmed (list), "
-    "candidate_collisions_rejected (list). Output ONLY valid JSON."
+    "candidate_collisions_rejected (list). "
+    "Before answering, read every path listed under 'Read these first (on "
+    "disk)' in the CONTEXT above; do not rely on the summary tables alone. "
+    "Output ONLY valid JSON."
 )
 
 

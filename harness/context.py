@@ -74,6 +74,31 @@ def _load_harness_toml(workspace_root: Path) -> dict:
         return {}
 
 
+def _load_goal_meta(workspace_root: Path) -> tuple[str, str]:
+    """Return (title, description) from goal.toml's [goal] table."""
+    p = workspace_root / "goal.toml"
+    if not p.exists():
+        return ("", "")
+    try:
+        data = tomllib.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except tomllib.TOMLDecodeError:
+        return ("", "")
+    g = data.get("goal", {})
+    return (g.get("title", ""), g.get("description", ""))
+
+
+def _render_goal_and_pointers(workspace_root: Path, title: str,
+                              description: str, pointers: list[str]) -> str:
+    lines = ["## Goal", "", f"**{title}**", "", description, "",
+             "## Read these first (on disk)", "",
+             "Read every path below before answering; the summary tables are "
+             "an index, not a substitute for the source.", ""]
+    for ptr in pointers:
+        lines.append(f"- `{ptr}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _header(role: str, round_id: str, variant_id: str,
             goal_version: str) -> str:
     return (
@@ -210,6 +235,14 @@ def build_designer_context(workspace_root: Path, round_id: str,
     claims = _load_claims_for_variant(workspace_root, variant_id)
 
     out = [_header("designer", round_id, variant_id, goal_version), ""]
+    title, description = _load_goal_meta(workspace_root)
+    out.append(_render_goal_and_pointers(
+        workspace_root, title, description, [
+            "goal.toml",
+            f"variants/nodes/{variant_id}/doc/",
+            f"rounds/{round_id}/scratch/planner.json",
+            "evidence/",
+        ]))
     out.append(_render_registered_decisions(decisions))
 
     # Own positions table
@@ -298,6 +331,13 @@ def build_reviewer_context(workspace_root: Path, round_id: str,
     harness_cfg = _load_harness_toml(workspace_root)
 
     out = [_header("reviewer", round_id, variant_id, goal_version), ""]
+    title, description = _load_goal_meta(workspace_root)
+    out.append(_render_goal_and_pointers(
+        workspace_root, title, description, [
+            f"rounds/{round_id}/patch.diff",
+            "evidence/",
+            f"variants/nodes/{variant_id}/doc/",
+        ]))
     out.append(_render_registered_decisions(decisions))
 
     # All positions across all variants
@@ -382,6 +422,12 @@ def build_verifier_c_context(workspace_root: Path, round_id: str,
                             variant_id: str) -> str:
     decisions = _load_decisions(workspace_root)
     goal_version = _load_goal_version(workspace_root)
+    title, description = _load_goal_meta(workspace_root)
     out = [_header("verifier_c", round_id, variant_id, goal_version), ""]
+    out.append(_render_goal_and_pointers(
+        workspace_root, title, description, [
+            f"rounds/{round_id}/patch.diff",
+            "evidence/",
+        ]))
     out.append(_render_registered_decisions(decisions))
     return "\n".join(out)

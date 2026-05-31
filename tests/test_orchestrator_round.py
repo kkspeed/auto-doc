@@ -828,5 +828,12 @@ class ReviewerScoreFieldsValidatorTest(unittest.TestCase):
             orchestrator.validate_reviewer_json(d)
 
 
+class PromptReadInstructionTest(unittest.TestCase):
+    def test_prompts_compel_reading(self):
+        for p in (orchestrator.DESIGNER_PROMPT, orchestrator.REVIEWER_PROMPT,
+                  orchestrator.VERIFIER_C_PROMPT):
+            self.assertIn("Read these first", p)
+
+
 if __name__ == "__main__":
     unittest.main()

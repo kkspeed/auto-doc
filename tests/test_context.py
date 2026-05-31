@@ -302,5 +302,38 @@ class BuildVerifierCContextTest(unittest.TestCase):
         self.assertIn("g-01", out)
 
 
+class ContextPointersTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        _write_goal_toml(self.td)  # title="test"
+        _write_decisions(self.td, {
+            "retry-policy": {"id": "retry-policy", "question": "?",
+                             "status": "open", "introduced_at": "g-01"},
+        })
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_designer_context_has_pointers_and_goal(self):
+        out = context.build_designer_context(self.td, "round-000001", "v-001")
+        self.assertIn("Read these first", out)
+        self.assertIn("goal.toml", out)
+        self.assertIn("variants/nodes/v-001/doc/", out)
+        self.assertIn("test", out)  # goal title
+
+    def test_verifier_c_context_points_at_patch_and_evidence(self):
+        out = context.build_verifier_c_context(self.td, "round-000001", "v-001")
+        self.assertIn("Read these first", out)
+        self.assertIn("rounds/round-000001/patch.diff", out)
+        self.assertIn("evidence/", out)
+        # registered decisions still rendered
+        self.assertIn("retry-policy", out)
+
+    def test_reviewer_context_points_at_patch(self):
+        out = context.build_reviewer_context(self.td, "round-000001", "v-001")
+        self.assertIn("rounds/round-000001/patch.diff", out)
+        self.assertIn("Read these first", out)
+
+
 if __name__ == "__main__":
     unittest.main()
