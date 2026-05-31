@@ -50,6 +50,7 @@ def _run_with_heartbeat(
     stdin_text: str,
     spawn_timeout_seconds: int,
     silence_threshold_seconds: int = 90,
+    cwd=None,
 ) -> _RunResult:
     """Spawn cmd, send stdin_text, watch for output silence.
 
@@ -68,6 +69,7 @@ def _run_with_heartbeat(
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, bufsize=0,
+            cwd=str(cwd) if cwd is not None else None,
         )
     except FileNotFoundError as e:
         # Tool not on PATH; report as "ran cleanly with non-zero exit" so the
@@ -273,6 +275,7 @@ def spawn_role(
     # --- Pass 1: invoke ---
     result1 = _run_with_heartbeat(
         cmd, stdin_text, spawn_timeout, silence_threshold,
+        cwd=workspace_root,
     )
     if result1.verdict == "timeout":
         return RoleOutput(
@@ -290,6 +293,7 @@ def spawn_role(
         time.sleep(retry_sleep)
         result2 = _run_with_heartbeat(
             cmd, stdin_text, spawn_timeout, silence_threshold,
+            cwd=workspace_root,
         )
         retry_count = 1
         elapsed += result2.elapsed_seconds
@@ -334,6 +338,7 @@ def spawn_role(
     retry_stdin = context_md + "\n\n" + retry_prompt
     result3 = _run_with_heartbeat(
         cmd, retry_stdin, spawn_timeout, silence_threshold,
+        cwd=workspace_root,
     )
     elapsed += result3.elapsed_seconds
     stderr_tail = result3.stderr_tail

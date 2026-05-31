@@ -419,5 +419,29 @@ class SpawnRoleConfigTest(unittest.TestCase):
         self.assertLess(elapsed, 5)
 
 
+class SpawnCwdTest(unittest.TestCase):
+    def test_run_with_heartbeat_passes_cwd(self):
+        import io
+        from unittest import mock
+        import harness.spawn as spawn_mod
+        captured = {}
+
+        class _FakeProc:
+            def __init__(self, *a, **kw):
+                captured["cwd"] = kw.get("cwd")
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO(b'{}')
+                self.stderr = io.BytesIO(b'')
+                self.returncode = 0
+            def poll(self): return 0
+            def wait(self, timeout=None): return 0
+            def kill(self): pass
+
+        with mock.patch.object(spawn_mod.subprocess, "Popen", _FakeProc):
+            spawn_mod._run_with_heartbeat(
+                ["echo"], "hi", 5, cwd="/tmp/some-workspace")
+        self.assertEqual(captured["cwd"], "/tmp/some-workspace")
+
+
 if __name__ == "__main__":
     unittest.main()
