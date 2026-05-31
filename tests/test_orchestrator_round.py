@@ -819,6 +819,11 @@ class ReviewerScoreFieldsValidatorTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             orchestrator.validate_reviewer_json(d)
 
+    def test_non_numeric_type_raises(self):
+        d = dict(self.BASE, goal_alignment="high")
+        with self.assertRaises(ValueError):
+            orchestrator.validate_reviewer_json(d)
+
 
 if __name__ == "__main__":
     unittest.main()
