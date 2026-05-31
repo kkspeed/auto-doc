@@ -74,9 +74,10 @@ def cmd_init(target_dir: Path, reactivate: bool) -> int:
              "commit", "-q", "-m", commit_msg],
             cwd=target_dir,
         )
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, OSError) as exc:
         # Half-initialized state isn't useful; remove it so a re-run isn't
-        # blocked by the "refusing to clobber" guard.
+        # blocked by the "refusing to clobber" guard. OSError covers the
+        # bootstrap.* filesystem steps (e.g. permission denied on derived/).
         shutil.rmtree(target_dir, ignore_errors=True)
         print(f"harness init: git step failed: {exc}", file=sys.stderr)
         return 1

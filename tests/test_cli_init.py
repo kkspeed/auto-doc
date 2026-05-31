@@ -173,6 +173,13 @@ class InitBootstrapsDerivedTest(unittest.TestCase):
             (self.ws / "derived" / "decisions.json").read_text())
         self.assertIn("retry-policy", data["decisions"])
 
+    def test_decisions_cache_not_tracked(self):
+        self._init()
+        tracked = subprocess.check_output(
+            ["git", "-C", str(self.ws), "ls-files",
+             "derived/decisions.json"]).decode().strip()
+        self.assertEqual(tracked, "")
+
     def test_registry_baseline_committed(self):
         self._init()
         tracked = subprocess.check_output(
