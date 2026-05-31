@@ -172,5 +172,30 @@ class RunLoopNoCapRaisesTest(unittest.TestCase):
             )
 
 
+class RunLoopBriefTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_morning_brief_written_at_pause(self):
+        def fake_run_round(workspace_root, harness_config,
+                           round_id, variant_id):
+            return orchestrator.RoundOutcome(
+                round_id=round_id, variant_id=variant_id,
+                verdict="spawn-failed", elapsed_seconds=0.01,
+            )
+        with mock.patch("harness.orchestrator.run_round",
+                        side_effect=fake_run_round):
+            orchestrator.run_loop(
+                self.ws, _harness_config(), max_rounds=1, variant_count=2)
+        brief = self.ws / "morning_brief.md"
+        self.assertTrue(brief.exists())
+        self.assertIn("# Morning brief", brief.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

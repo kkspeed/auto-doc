@@ -26,6 +26,7 @@ from harness import context as context_mod
 from harness import round_ledger
 from harness import verifiers
 from harness import scorecard as scorecard_mod
+from harness import morning_brief as morning_brief_mod
 from harness.round_ledger import _ALLOWED_REASONS
 from harness.spawn import RoleOutput, spawn_role
 
@@ -132,6 +133,16 @@ def _now_iso() -> str:
 def _log(workspace_root: Path, event: str, **fields) -> None:
     entry = {"ts": _now_iso(), "event": event, **fields}
     round_ledger.append_actions_log(workspace_root, entry)
+
+
+def _current_head_sha(workspace_root: Path) -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(workspace_root), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except subprocess.CalledProcessError:
+        return None
 
 
 def _read_round_actions(workspace_root: Path, round_id: str) -> list[dict]:
@@ -834,6 +845,7 @@ def run_loop(
     loop_start = time.monotonic()
     outcomes: list[RoundOutcome] = []
     next_n = _next_round_number(workspace_root)
+    start_sha = _current_head_sha(workspace_root)
 
     while True:
         if max_rounds is not None and len(outcomes) >= max_rounds:
@@ -849,5 +861,8 @@ def run_loop(
         )
         outcomes.append(outcome)
         next_n += 1
+
+    brief = morning_brief_mod.render_morning_brief(workspace_root, start_sha)
+    (workspace_root / "morning_brief.md").write_text(brief)
 
     return outcomes
