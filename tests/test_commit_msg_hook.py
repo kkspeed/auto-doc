@@ -357,5 +357,37 @@ class CommitMsgImmutabilityTest(unittest.TestCase):
         self.assertIn("cannot delete decided", result.stderr)
 
 
+class ScoreRegressionActionTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_score_regression_with_required_trailers_passes(self):
+        # Stage a rejection file so the file-whitelist check is satisfied.
+        rej = self.ws / "rejections" / "rj-000001.md"
+        rej.parent.mkdir(parents=True, exist_ok=True)
+        rej.write_text("+++\n+++\nbody\n")
+        subprocess.check_call(["git", "-C", str(self.ws), "add", "-f",
+                               "rejections/rj-000001.md"])
+        msg = _write_msg(self.ws,
+            "chore: score-regression for round-000002 v-001\n\n"
+            "Action: score-regression\nVariant: v-001\n"
+            "Round: round-000002\nReason: score-regression\n")
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+
+    def test_score_regression_missing_reason_rejects(self):
+        msg = _write_msg(self.ws,
+            "chore: score-regression\n\n"
+            "Action: score-regression\nVariant: v-001\nRound: round-000002\n")
+        result = _run_hook(self.ws, msg)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Reason", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
