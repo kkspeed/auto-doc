@@ -247,8 +247,7 @@ def _materialize_designer_output(
     # is a no-op.
     patch_diff = parsed.get("patch_diff", "") or ""
     if patch_diff.strip():
-        import subprocess as _sp
-        result = _sp.run(
+        result = subprocess.run(
             ["git", "-C", str(workspace_root), "apply", "--whitespace=nowarn"],
             input=patch_diff, text=True,
             capture_output=True,
@@ -301,20 +300,19 @@ def _materialize_reviewer_attacks(
 def _discard_materialized(workspace_root: Path,
                           paths: list[Path]) -> None:
     """Remove new files or git-checkout HEAD for modified files."""
-    import subprocess as _sp
     for p in paths:
         if not p.exists():
             continue
         # Was it tracked by git at HEAD?
         rel = p.relative_to(workspace_root)
-        ls = _sp.run(
+        ls = subprocess.run(
             ["git", "-C", str(workspace_root), "ls-files", "--error-unmatch",
              str(rel)],
             capture_output=True, text=True,
         )
         if ls.returncode == 0:
             # Modified tracked file → restore from HEAD
-            _sp.check_call(
+            subprocess.check_call(
                 ["git", "-C", str(workspace_root), "checkout", "HEAD",
                  "--", str(rel)],
             )
@@ -717,7 +715,6 @@ def run_round(
 
     # ---- Phase 7a: Flow A — register-decision ----
     if approved_proposals:
-        goal_toml_path = workspace_root / "goal.toml"
         decisions_json_path = workspace_root / "derived" / "decisions.json"
         cg.register_decision(
             goal_toml_path,

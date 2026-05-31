@@ -42,11 +42,6 @@ def _last_commit_body(ws: Path) -> str:
         ["git", "-C", str(ws), "log", "-1", "--format=%B"], text=True)
 
 
-def _full_log(ws: Path) -> str:
-    return subprocess.check_output(
-        ["git", "-C", str(ws), "log", "--format=%B---END---"], text=True)
-
-
 class ScoreGateTest(unittest.TestCase):
     def setUp(self):
         self.td = Path(tempfile.mkdtemp())
