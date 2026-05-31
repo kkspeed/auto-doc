@@ -870,6 +870,20 @@ class MaterializeFailLoudTest(unittest.TestCase):
         self.assertTrue(
             (self.ws / "rounds" / "round-000001" / "patch.diff").exists())
 
+    def test_malformed_attack_id_raises(self):
+        parsed = {"attacks": [{"id": "../evil"}]}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_reviewer_attacks(
+                self.ws, "v-001", parsed)
+
+    def test_patch_diff_empty_content(self):
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": "", "evidence": [], "claims": []}
+        orchestrator._materialize_designer_output(self.ws, "v-001", parsed)
+        content = (self.ws / "rounds" / "round-000001"
+                   / "patch.diff").read_text()
+        self.assertEqual(content, "")
+
 
 class ValidateDesignerStrictTest(unittest.TestCase):
     def test_non_string_patch_diff_raises(self):
@@ -887,6 +901,39 @@ class ValidateDesignerStrictTest(unittest.TestCase):
                 "claims": [{"id": "cl-000001", "decision_id": "d",
                             "section_id": "d", "claim_type": "decision",
                             "position": "p", "evidence_ids": ["ev-999999"]}]})
+
+    def test_duplicate_evidence_id_raises(self):
+        ev = {"id": "ev-000001", "confidence": "high", "citations": [],
+              "claim": "c", "excerpt": "e"}
+        with self.assertRaises(ValueError):
+            orchestrator.validate_designer_json({
+                "round": "r", "variant": "v", "patch_diff": "",
+                "evidence": [dict(ev), dict(ev)], "claims": []})
+
+
+class BadAttackRejectsNotCrashTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        from harness import bootstrap
+        bootstrap.rebuild_decisions_cache(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_malformed_attack_id_rejects(self):
+        claim = {"id": "cl-000001", "section_id": "retry-policy",
+                 "decision_id": "retry-policy", "claim_type": "decision",
+                 "evidence_ids": [], "assertion": "x", "position": "expo"}
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[claim]),
+            _reviewer_ok(attacks=[{"id": "../evil", "at_type": "dispute_claim"}]),
+            _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "reviewer-rejected")
 
 
 if __name__ == "__main__":

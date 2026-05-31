@@ -32,6 +32,7 @@ from harness.spawn import RoleOutput, spawn_role
 
 
 _ID_RE = re.compile(r"^(cl|ev|at)-\d{6}$")
+_EV_ID_RE = re.compile(r"^ev-\d{6}$")
 
 
 def _toml_basic_str_escape(s: str) -> str:
@@ -91,13 +92,16 @@ def validate_designer_json(d: dict) -> None:
         if not isinstance(ev, dict):
             raise ValueError("designer.json evidence item must be an object")
         ev_id = ev.get("id")
-        if not isinstance(ev_id, str) or not re.match(r"^ev-\d{6}$", ev_id):
+        if not isinstance(ev_id, str) or not _EV_ID_RE.match(ev_id):
             raise ValueError(
                 f"designer.json evidence id invalid: {ev_id!r}")
         for k in ("confidence", "citations", "claim", "excerpt"):
             if k not in ev:
                 raise ValueError(
                     f"designer.json evidence {ev_id} missing {k!r}")
+        if ev_id in evidence_ids:
+            raise ValueError(
+                f"designer.json duplicate evidence id {ev_id!r}")
         evidence_ids.add(ev_id)
     for c in d["claims"]:
         cg.Claim.from_dict(c)  # slug + required-field checks
@@ -663,9 +667,18 @@ def run_round(
             )
         approved_proposals = outcome_dict["approved"]
     # Materialize attacks (deferred until after Phase 5.5 gating)
-    att_materialized, attack_paths = _materialize_reviewer_attacks(
-        workspace_root, variant_id, reviewer_result.parsed,
-    )
+    try:
+        att_materialized, attack_paths = _materialize_reviewer_attacks(
+            workspace_root, variant_id, reviewer_result.parsed,
+        )
+    except RuntimeError as e:
+        return _reject(
+            action="reviewer-rejected",
+            reason_class="cross-field-fail",
+            failed_phase="reviewer",
+            detail=f"attack materialize failure: {e}",
+            reviewer_id=variant_id,
+        )
     materialized.extend(att_materialized)
 
     # ---- Phase 6: Verifier C ----
