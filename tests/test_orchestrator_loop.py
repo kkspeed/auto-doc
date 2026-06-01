@@ -258,5 +258,30 @@ class RunLoopBootstrapTest(unittest.TestCase):
         self.assertIn("new-thing", data["decisions"])
 
 
+class RunLoopResumeNoBriefAbortTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_second_run_loop_does_not_abort_on_morning_brief(self):
+        def fake_run_round(workspace_root, harness_config, round_id, variant_id):
+            return orchestrator.RoundOutcome(
+                round_id=round_id, variant_id=variant_id,
+                verdict="spawn-failed", elapsed_seconds=0.01)
+        with mock.patch("harness.orchestrator.run_round",
+                        side_effect=fake_run_round):
+            orchestrator.run_loop(self.ws, _harness_config(),
+                                  max_rounds=1, variant_count=2)
+            # morning_brief.md now exists (written at loop pause). A second
+            # run_loop must NOT abort on the clean-worktree guard.
+            self.assertTrue((self.ws / "morning_brief.md").exists())
+            orchestrator.run_loop(self.ws, _harness_config(),
+                                  max_rounds=1, variant_count=2)
+
+
 if __name__ == "__main__":
     unittest.main()
