@@ -23,34 +23,21 @@ class DirtyWorktreeError(RuntimeError):
 
 
 def rebuild_decisions_cache(workspace_root: Path) -> None:
-    """Regenerate derived/decisions.json from goal.toml's [[decision]] array.
-
-    Deterministic, idempotent overwrite. derived/ is gitignored; both the
-    context builders and the pre-commit hook read this file from the working
-    tree, so it need not be committed.
-    """
+    """Regenerate derived/decisions.json from goal.toml via the canonical
+    claim_graph loader. Missing goal.toml -> empty cache. A goal.toml that
+    exists but is malformed (bad TOML, missing goal_version, invalid/duplicate
+    decision) raises (SchemaError / TOMLDecodeError) — a trustworthiness
+    bootstrap must fail loud rather than silently produce a false-empty
+    registry. derived/ is gitignored; consumers read this file from the tree."""
     goal_path = workspace_root / "goal.toml"
-    decisions: dict[str, dict] = {}
-    if goal_path.exists():
-        try:
-            data = tomllib.loads(
-                goal_path.read_text(encoding="utf-8", errors="replace"))
-        except (tomllib.TOMLDecodeError, OSError):
-            data = {}
-        for d in data.get("decision", []) or []:
-            d_id = d.get("id")
-            if not isinstance(d_id, str) or not d_id:
-                continue
-            decisions[d_id] = {
-                "id": d_id,
-                "question": d.get("question", ""),
-                "status": d.get("status", "open"),
-                "introduced_at": d.get("introduced_at", ""),
-            }
-    out_dir = workspace_root / "derived"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "decisions.json").write_text(
-        json.dumps({"decisions": decisions}, indent=2, sort_keys=True))
+    out_path = workspace_root / "derived" / "decisions.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not goal_path.exists():
+        out_path.write_text(
+            json.dumps({"decisions": {}}, indent=2, sort_keys=True))
+        return
+    decisions, goal_version = cg.load_decisions_from_goal_toml(goal_path)
+    cg.dump_decisions_to_json(decisions, goal_version, out_path)
 
 
 def ensure_empty_registry(workspace_root: Path) -> None:

@@ -57,18 +57,26 @@ class RebuildDecisionsCacheTest(unittest.TestCase):
         data = json.loads((self.td / "derived" / "decisions.json").read_text())
         self.assertEqual(data["decisions"], {})
 
-    def test_malformed_toml_writes_empty(self):
+    def test_malformed_toml_raises(self):
         (self.td / "goal.toml").write_text("[[invalid")
-        bootstrap.rebuild_decisions_cache(self.td)
-        data = json.loads((self.td / "derived" / "decisions.json").read_text())
-        self.assertEqual(data["decisions"], {})
+        with self.assertRaises(Exception):
+            bootstrap.rebuild_decisions_cache(self.td)
 
-    def test_non_string_id_skipped(self):
+    def test_non_string_id_raises(self):
         (self.td / "goal.toml").write_text(
-            '[[decision]]\nid = 42\nquestion = "q"\nstatus = "open"\n')
-        bootstrap.rebuild_decisions_cache(self.td)
-        data = json.loads((self.td / "derived" / "decisions.json").read_text())
-        self.assertEqual(data["decisions"], {})
+            '[goal]\ngoal_version = "g-01"\n'
+            '[[decision]]\nid = 42\nquestion = "q"\n'
+            'status = "open"\nintroduced_at = "g-01"\n')
+        with self.assertRaises(Exception):
+            bootstrap.rebuild_decisions_cache(self.td)
+
+    def test_missing_goal_version_raises(self):
+        (self.td / "goal.toml").write_text(
+            '[goal]\ntitle = "t"\n'
+            '[[decision]]\nid = "retry-policy"\nquestion = "q"\n'
+            'status = "open"\nintroduced_at = "g-01"\n')
+        with self.assertRaises(Exception):
+            bootstrap.rebuild_decisions_cache(self.td)
 
 
 class EnsureEmptyRegistryTest(unittest.TestCase):
