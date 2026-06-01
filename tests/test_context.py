@@ -337,5 +337,25 @@ class ContextPointersTest(unittest.TestCase):
         self.assertIn("Read these first", out)
 
 
+class ContextClaimPointersTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        _write_goal_toml(self.td)
+        _write_decisions(self.td, {
+            "retry-policy": {"id": "retry-policy", "question": "?",
+                             "status": "open", "introduced_at": "g-01"}})
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_reviewer_points_at_claims_dir(self):
+        out = context.build_reviewer_context(self.td, "round-000001", "v-001")
+        self.assertIn("variants/nodes/v-001/claims/", out)
+
+    def test_verifier_c_points_at_claims_dir(self):
+        out = context.build_verifier_c_context(self.td, "round-000001", "v-001")
+        self.assertIn("variants/nodes/v-001/claims/", out)
+
+
 if __name__ == "__main__":
     unittest.main()
