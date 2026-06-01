@@ -2,10 +2,12 @@ import json
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
 from harness import bootstrap
+from harness import claim_graph as cg
 
 GOAL_TOML = """\
 [goal]
@@ -59,7 +61,7 @@ class RebuildDecisionsCacheTest(unittest.TestCase):
 
     def test_malformed_toml_raises(self):
         (self.td / "goal.toml").write_text("[[invalid")
-        with self.assertRaises(Exception):
+        with self.assertRaises(tomllib.TOMLDecodeError):
             bootstrap.rebuild_decisions_cache(self.td)
 
     def test_non_string_id_raises(self):
@@ -67,7 +69,7 @@ class RebuildDecisionsCacheTest(unittest.TestCase):
             '[goal]\ngoal_version = "g-01"\n'
             '[[decision]]\nid = 42\nquestion = "q"\n'
             'status = "open"\nintroduced_at = "g-01"\n')
-        with self.assertRaises(Exception):
+        with self.assertRaises(cg.SchemaError):
             bootstrap.rebuild_decisions_cache(self.td)
 
     def test_missing_goal_version_raises(self):
@@ -75,7 +77,7 @@ class RebuildDecisionsCacheTest(unittest.TestCase):
             '[goal]\ntitle = "t"\n'
             '[[decision]]\nid = "retry-policy"\nquestion = "q"\n'
             'status = "open"\nintroduced_at = "g-01"\n')
-        with self.assertRaises(Exception):
+        with self.assertRaises(cg.SchemaError):
             bootstrap.rebuild_decisions_cache(self.td)
 
 
