@@ -446,11 +446,19 @@ def run_round(
         # partial register-decision/canonicalize commits + materialized files),
         # then record a single hook-rejected rejection. Ignored files (the
         # derived/ cache, scratch/) are intentionally preserved by `clean -fd`.
-        subprocess.run(["git", "-C", str(workspace_root), "reset",
-                        "--hard", round_start_sha],
-                       capture_output=True, text=True)
-        subprocess.run(["git", "-C", str(workspace_root), "clean", "-fd"],
-                       capture_output=True, text=True)
+        reset = subprocess.run(["git", "-C", str(workspace_root), "reset",
+                                "--hard", round_start_sha],
+                               capture_output=True, text=True)
+        if reset.returncode != 0:
+            raise RuntimeError(
+                "_commit_reject: git reset --hard failed; workspace may be "
+                f"corrupt: {(reset.stderr or '').strip()}")
+        clean = subprocess.run(["git", "-C", str(workspace_root), "clean",
+                                "-fd"], capture_output=True, text=True)
+        if clean.returncode != 0:
+            raise RuntimeError(
+                "_commit_reject: git clean -fd failed; workspace may be "
+                f"corrupt: {(clean.stderr or '').strip()}")
         # The reset rolls back goal.toml; the derived/decisions.json cache is now
         # inconsistent with it (deleted if register_decision force-committed it
         # this round, or stale if it was an ignored write). Re-derive the cache
