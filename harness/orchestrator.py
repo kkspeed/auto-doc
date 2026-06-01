@@ -235,7 +235,10 @@ VERIFIER_C_PROMPT = (
 def _materialize_designer_output(
     workspace_root: Path, variant_id: str, round_id: str, parsed: dict,
 ) -> tuple[list[Path], list[str], list[str], list[str], list[str]]:
-    """Materialize designer's parsed output to disk.
+    """Materialize designer's parsed output to disk. ATOMIC: if any step
+    raises, every file written by this call is discarded before the exception
+    propagates, so a mid-batch failure never leaves an orphan that would dirty
+    the next round's worktree.
 
     Returns (materialized_paths_for_rollback, section_paths, claim_paths,
     attack_paths, evidence_paths) — the latter four are relative-to-workspace
@@ -247,123 +250,123 @@ def _materialize_designer_output(
     attack_paths: list[str] = []
     evidence_paths: list[str] = []
 
-    # Evidence
-    evidence_dir = workspace_root / "evidence"
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    for ev in parsed.get("evidence", []) or []:
-        ev_id = ev.get("id", "")
-        if not ev_id or not _ID_RE.match(ev_id):
-            raise RuntimeError(
-                f"materialize: malformed/unsafe evidence id {ev_id!r}")
-        # Build TOML frontmatter using basic strings with proper escapes.
-        # Triple-quoted strings can't be safely escaped if the content
-        # contains literal `"""`, so we use single-line basic strings
-        # with newlines escaped as \\n.
-        fm_lines = []
-        for key in ("id", "confidence", "claim", "excerpt", "match"):
-            val = ev.get(key)
-            if val is None:
-                continue
-            escaped = _toml_basic_str_escape(str(val))
-            fm_lines.append(f'{key} = "{escaped}"')
-        text = "+++\n" + "\n".join(fm_lines) + "\n+++\n\n" + \
-               str(ev.get("excerpt", "")) + "\n"
-        ev_path = evidence_dir / f"{ev_id}.md"
-        if ev_path.exists():
-            raise RuntimeError(
-                f"materialize: evidence id {ev_id!r} already exists on disk "
-                "(append-only ledger violation)")
-        ev_path.write_text(text)
-        materialized.append(ev_path)
-        evidence_paths.append(f"evidence/{ev_id}.md")
+    try:
+        # Evidence
+        evidence_dir = workspace_root / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        for ev in parsed.get("evidence", []) or []:
+            ev_id = ev.get("id", "")
+            if not ev_id or not _ID_RE.match(ev_id):
+                raise RuntimeError(
+                    f"materialize: malformed/unsafe evidence id {ev_id!r}")
+            # Build TOML frontmatter using basic strings with proper escapes.
+            # Triple-quoted strings can't be safely escaped if the content
+            # contains literal `"""`, so we use single-line basic strings
+            # with newlines escaped as \\n.
+            fm_lines = []
+            for key in ("id", "confidence", "claim", "excerpt", "match"):
+                val = ev.get(key)
+                if val is None:
+                    continue
+                escaped = _toml_basic_str_escape(str(val))
+                fm_lines.append(f'{key} = "{escaped}"')
+            text = "+++\n" + "\n".join(fm_lines) + "\n+++\n\n" + \
+                   str(ev.get("excerpt", "")) + "\n"
+            ev_path = evidence_dir / f"{ev_id}.md"
+            if ev_path.exists():
+                raise RuntimeError(
+                    f"materialize: evidence id {ev_id!r} already exists on "
+                    "disk (append-only ledger violation)")
+            ev_path.write_text(text)
+            materialized.append(ev_path)
+            evidence_paths.append(f"evidence/{ev_id}.md")
 
-    # Claims
-    claims_dir = workspace_root / "variants" / "nodes" / variant_id / "claims"
-    claims_dir.mkdir(parents=True, exist_ok=True)
-    seen_claim_ids: set[str] = set()
-    for claim in parsed.get("claims", []) or []:
-        cl_id = claim.get("id", "")
-        if not cl_id or not _ID_RE.match(cl_id):
-            raise RuntimeError(
-                f"materialize: malformed/unsafe claim id {cl_id!r}")
-        if cl_id in seen_claim_ids:
-            raise RuntimeError(
-                f"materialize: duplicate claim id {cl_id!r} in round")
-        seen_claim_ids.add(cl_id)
-        cl_path = claims_dir / f"{cl_id}.json"
-        if cl_path.exists():
-            raise RuntimeError(
-                f"materialize: claim id {cl_id!r} already exists on disk "
-                "(append-only ledger violation)")
-        cl_path.write_text(json.dumps(claim, indent=2, sort_keys=True))
-        materialized.append(cl_path)
-        claim_paths.append(
-            f"variants/nodes/{variant_id}/claims/{cl_id}.json"
-        )
+        # Claims
+        claims_dir = (workspace_root / "variants" / "nodes" / variant_id
+                      / "claims")
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        seen_claim_ids: set[str] = set()
+        for claim in parsed.get("claims", []) or []:
+            cl_id = claim.get("id", "")
+            if not cl_id or not _ID_RE.match(cl_id):
+                raise RuntimeError(
+                    f"materialize: malformed/unsafe claim id {cl_id!r}")
+            if cl_id in seen_claim_ids:
+                raise RuntimeError(
+                    f"materialize: duplicate claim id {cl_id!r} in round")
+            seen_claim_ids.add(cl_id)
+            cl_path = claims_dir / f"{cl_id}.json"
+            if cl_path.exists():
+                raise RuntimeError(
+                    f"materialize: claim id {cl_id!r} already exists on disk "
+                    "(append-only ledger violation)")
+            cl_path.write_text(json.dumps(claim, indent=2, sort_keys=True))
+            materialized.append(cl_path)
+            claim_paths.append(
+                f"variants/nodes/{variant_id}/claims/{cl_id}.json")
 
-    # patch_diff: if non-empty, apply with `git apply`. For v0, empty patch_diff
-    # is a no-op.
-    patch_diff = parsed.get("patch_diff", "") or ""
-    if patch_diff.strip():
-        result = subprocess.run(
-            ["git", "-C", str(workspace_root), "apply", "--whitespace=nowarn"],
-            input=patch_diff, text=True,
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            # Caller treats as cross-field-fail; clean up evidence + claims
-            # we already wrote.
-            for p in materialized:
-                try:
-                    p.unlink()
-                except FileNotFoundError:
-                    pass
-            raise RuntimeError(
-                f"git apply failed: {result.stderr.strip()}"
-            )
-        # Extract section paths from the patch_diff (lines starting with
-        # `+++ b/`).
-        for line in patch_diff.split("\n"):
-            if line.startswith("+++ b/"):
-                rel = line[len("+++ b/"):].strip()
-                if rel.startswith(f"variants/nodes/{variant_id}/doc/"):
-                    section_paths.append(rel)
-                    materialized.append(workspace_root / rel)
+        # patch_diff: if non-empty, apply with `git apply`. Empty is a no-op.
+        patch_diff = parsed.get("patch_diff", "") or ""
+        if patch_diff.strip():
+            result = subprocess.run(
+                ["git", "-C", str(workspace_root), "apply",
+                 "--whitespace=nowarn"],
+                input=patch_diff, text=True, capture_output=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"git apply failed: {result.stderr.strip()}")
+            # Extract section paths from the patch_diff (lines starting with
+            # `+++ b/`).
+            for line in patch_diff.split("\n"):
+                if line.startswith("+++ b/"):
+                    rel = line[len("+++ b/"):].strip()
+                    if rel.startswith(f"variants/nodes/{variant_id}/doc/"):
+                        section_paths.append(rel)
+                        materialized.append(workspace_root / rel)
 
-    # Write the round's patch.diff pointer (always, even when empty) so
-    # Reviewer/Verifier-C CONTEXT.md can point at a stable on-disk file.
-    # Use the TRUSTED round_id (caller-supplied) not the agent-reported value.
-    round_dir = workspace_root / "rounds" / round_id
-    round_dir.mkdir(parents=True, exist_ok=True)
-    (round_dir / "patch.diff").write_text(patch_diff, encoding="utf-8")
+        # Write the round's patch.diff pointer (always, even when empty) under
+        # the TRUSTED round_id so Reviewer/Verifier-C can point at a stable
+        # on-disk file.
+        round_dir = workspace_root / "rounds" / round_id
+        round_dir.mkdir(parents=True, exist_ok=True)
+        (round_dir / "patch.diff").write_text(patch_diff, encoding="utf-8")
+    except Exception:
+        _discard_materialized(workspace_root, materialized)
+        raise
 
-    return materialized, section_paths, claim_paths, attack_paths, evidence_paths
+    return (materialized, section_paths, claim_paths, attack_paths,
+            evidence_paths)
 
 
 def _materialize_reviewer_attacks(
     workspace_root: Path, variant_id: str, parsed: dict,
 ) -> tuple[list[Path], list[str]]:
-    """Materialize reviewer's attacks (at-*.json) to disk. Returns
+    """Materialize reviewer's attacks (at-*.json) to disk. ATOMIC: discards
+    any file written by this call if a later item raises. Returns
     (materialized_paths, attack_paths_for_git_add)."""
-    attacks_dir = workspace_root / "variants" / "nodes" / variant_id / "attacks"
+    attacks_dir = (workspace_root / "variants" / "nodes" / variant_id
+                   / "attacks")
     materialized: list[Path] = []
     attack_paths: list[str] = []
-    for at in parsed.get("attacks", []) or []:
-        at_id = at.get("id", "")
-        if not at_id or not _ID_RE.match(at_id):
-            raise RuntimeError(
-                f"materialize: malformed/unsafe attack id {at_id!r}")
-        attacks_dir.mkdir(parents=True, exist_ok=True)
-        at_path = attacks_dir / f"{at_id}.json"
-        if at_path.exists():
-            raise RuntimeError(
-                f"materialize: attack id {at_id!r} already exists on disk "
-                "(append-only ledger violation)")
-        at_path.write_text(json.dumps(at, indent=2, sort_keys=True))
-        materialized.append(at_path)
-        attack_paths.append(
-            f"variants/nodes/{variant_id}/attacks/{at_id}.json"
-        )
+    try:
+        for at in parsed.get("attacks", []) or []:
+            at_id = at.get("id", "")
+            if not at_id or not _ID_RE.match(at_id):
+                raise RuntimeError(
+                    f"materialize: malformed/unsafe attack id {at_id!r}")
+            attacks_dir.mkdir(parents=True, exist_ok=True)
+            at_path = attacks_dir / f"{at_id}.json"
+            if at_path.exists():
+                raise RuntimeError(
+                    f"materialize: attack id {at_id!r} already exists on disk "
+                    "(append-only ledger violation)")
+            at_path.write_text(json.dumps(at, indent=2, sort_keys=True))
+            materialized.append(at_path)
+            attack_paths.append(
+                f"variants/nodes/{variant_id}/attacks/{at_id}.json")
+    except Exception:
+        _discard_materialized(workspace_root, materialized)
+        raise
     return materialized, attack_paths
 
 

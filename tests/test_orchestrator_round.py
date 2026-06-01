@@ -1133,5 +1133,85 @@ class MaterializeNoOverwriteTest(unittest.TestCase):
                 self.ws, "v-001", parsed)
 
 
+class MaterializeAtomicTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_designer_midbatch_raise_leaves_no_orphan(self):
+        # First claim is fresh; second collides with a pre-existing on-disk id.
+        cl_dir = self.ws / "variants" / "nodes" / "v-001" / "claims"
+        cl_dir.mkdir(parents=True, exist_ok=True)
+        (cl_dir / "cl-000002.json").write_text("{}")  # pre-existing collision
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": "", "evidence": [],
+                  "claims": [
+                    {"id": "cl-000001", "section_id": "retry-policy",
+                     "decision_id": "retry-policy", "claim_type": "decision",
+                     "position": "expo", "evidence_ids": []},
+                    {"id": "cl-000002", "section_id": "retry-policy",
+                     "decision_id": "retry-policy", "claim_type": "decision",
+                     "position": "linear", "evidence_ids": []}]}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", "round-000001", parsed)
+        # The fresh cl-000001 written before the raise must NOT be left behind.
+        self.assertFalse((cl_dir / "cl-000001.json").exists(),
+                         "orphan cl-000001.json left after mid-batch raise")
+        # The pre-existing collision file must be untouched.
+        self.assertTrue((cl_dir / "cl-000002.json").exists())
+
+    def test_designer_evidence_midbatch_raise_leaves_no_orphan(self):
+        ev_dir = self.ws / "evidence"
+        ev_dir.mkdir(parents=True, exist_ok=True)
+        (ev_dir / "ev-000002.md").write_text("+++\n+++\n")  # collision
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": "", "claims": [],
+                  "evidence": [
+                    {"id": "ev-000001", "confidence": "high", "citations": [],
+                     "claim": "c", "excerpt": "e"},
+                    {"id": "ev-000002", "confidence": "high", "citations": [],
+                     "claim": "c", "excerpt": "e"}]}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", "round-000001", parsed)
+        self.assertFalse((ev_dir / "ev-000001.md").exists(),
+                         "orphan ev-000001.md left after mid-batch raise")
+
+    def test_round_with_colliding_claim_leaves_clean_tree(self):
+        # End-to-end: a round whose designer batch collides mid-way rejects AND
+        # leaves a clean worktree (so the next round's guard would pass).
+        cl_dir = self.ws / "variants" / "nodes" / "v-001" / "claims"
+        cl_dir.mkdir(parents=True, exist_ok=True)
+        # Commit a pre-existing cl-000002 so it's tracked/committed (a prior round).
+        (cl_dir / "cl-000002.json").write_text("{}")
+        subprocess.check_call(["git", "-C", str(self.ws), "add", "-f",
+                               "variants/nodes/v-001/claims/cl-000002.json"])
+        subprocess.check_call(["git", "-C", str(self.ws),
+                               "-c", "user.email=h@l", "-c", "user.name=h",
+                               "commit", "-q", "--no-verify",
+                               "-m", "seed\n\nAction: init\n"])
+        claims = [
+            {"id": "cl-000001", "section_id": "retry-policy",
+             "decision_id": "retry-policy", "claim_type": "decision",
+             "position": "expo", "evidence_ids": []},
+            {"id": "cl-000002", "section_id": "retry-policy",
+             "decision_id": "retry-policy", "claim_type": "decision",
+             "position": "linear", "evidence_ids": []}]
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+                _planner_ok(), _designer_ok(claims=claims),
+                _reviewer_ok(), _verifier_c_ok()]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertNotEqual(outcome.verdict, "merge")
+        st = subprocess.check_output(
+            ["git", "-C", str(self.ws), "status", "--porcelain"]).decode()
+        self.assertEqual(st.strip(), "", f"tree dirty after rejection: {st!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
