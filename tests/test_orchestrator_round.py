@@ -982,5 +982,35 @@ class FreshInitRoundReachesMergeTest(unittest.TestCase):
         self.assertEqual(outcome.verdict, "merge")
 
 
+class RegistryMaintenanceTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)  # init bootstraps cache + empty registry
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_authored_position_appended_to_registry(self):
+        claim = {"id": "cl-000001", "section_id": "retry-policy",
+                 "decision_id": "retry-policy", "claim_type": "decision",
+                 "evidence_ids": [], "assertion": "Use expo-backoff.",
+                 "position": "expo-backoff"}
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[claim]),
+            _reviewer_ok(), _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "merge")
+        reg = json.loads((self.ws / "derived"
+                          / "canonical_slug_registry.json").read_text())
+        self.assertIn("expo-backoff",
+                      reg.get("retry-policy", {}).get("canonical", []))
+        log = subprocess.check_output(
+            ["git", "-C", str(self.ws), "log", "--format=%B"]).decode()
+        self.assertIn("Action: registry-sync", log)
+
+
 if __name__ == "__main__":
     unittest.main()

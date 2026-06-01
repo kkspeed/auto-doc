@@ -889,6 +889,40 @@ def run_round(
             _log(workspace_root, "commit", round_id=round_id,
                  action="canonicalize")
 
+    # ---- Phase 7c: registry-sync — append authored position slugs ----
+    # Runs after 7b canonicalize (which targets prior-round canonicals) so the
+    # slugs this round authored become canonical for future rounds.
+    reg_sync_path = workspace_root / "derived" / "canonical_slug_registry.json"
+    if reg_sync_path.exists():
+        reg_sync = cg.CanonicalSlugRegistry.from_dict(
+            json.loads(reg_sync_path.read_text()))
+    else:
+        reg_sync = cg.CanonicalSlugRegistry()
+    before = json.dumps(reg_sync.to_dict(), sort_keys=True)
+    for claim in designer_result.parsed.get("claims", []) or []:
+        if claim.get("claim_type") != "decision":
+            continue
+        decision_id = claim.get("decision_id")
+        position = claim.get("position")
+        if not decision_id or not position:
+            continue
+        try:
+            cg.add_canonical_position(reg_sync, decision_id, position)
+        except cg.RegistryInvariantError:
+            # slug is already an alias for this decision (append-only
+            # invariant); it's already represented, so skip.
+            pass
+    if json.dumps(reg_sync.to_dict(), sort_keys=True) != before:
+        reg_sync_path.parent.mkdir(parents=True, exist_ok=True)
+        reg_sync_path.write_text(json.dumps(
+            reg_sync.to_dict(), indent=2, sort_keys=True))
+        try:
+            round_ledger.commit_registry_sync(workspace_root)
+        except subprocess.CalledProcessError as exc:
+            return _commit_reject(exc)
+        _log(workspace_root, "commit", round_id=round_id,
+             action="registry-sync")
+
     # ---- Phase 8: Final merge commit ----
     # Log terminal events BEFORE the commit so they're staged into the same
     # merge commit (which includes actions.jsonl), leaving the worktree clean
