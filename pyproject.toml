@@ -3,6 +3,9 @@ name = "auto-design-doc"
 version = "0.0.1"
 description = "Design Doc Evolution Harness — claim graph module"
 requires-python = ">=3.11"
+dependencies = [
+    "pytest>=9.0.3",
+]
 
 [project.scripts]
 harness = "harness.cli:main"
