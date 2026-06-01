@@ -395,6 +395,11 @@ def run_round(
     start_ts = time.monotonic()
     spawn_counts: dict[str, int] = {}
     materialized: list[Path] = []
+    bootstrap.assert_clean_worktree(workspace_root)
+    round_start_sha = subprocess.check_output(
+        ["git", "-C", str(workspace_root), "rev-parse", "HEAD"],
+        text=True).strip()
+
     _log(workspace_root, "round_start",
          round_id=round_id, variant_id=variant_id)
 
@@ -432,6 +437,39 @@ def run_round(
             elapsed_seconds=time.monotonic() - start_ts,
             spawn_counts=spawn_counts,
         )
+
+    def _commit_reject(exc: subprocess.CalledProcessError) -> RoundOutcome:
+        # A commit failed its hooks. Reset the round to its start (erasing any
+        # partial register-decision/canonicalize commits + materialized files),
+        # then record a single hook-rejected rejection. Ignored files (the
+        # derived/ cache, scratch/) are intentionally preserved by `clean -fd`.
+        subprocess.run(["git", "-C", str(workspace_root), "reset",
+                        "--hard", round_start_sha],
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(workspace_root), "clean", "-fd"],
+                       capture_output=True, text=True)
+        detail = (exc.stderr or "").strip() or "commit failed"
+        rj_id = round_ledger.write_rejection(
+            workspace_root, round_id, variant_id,
+            reason_class="hook-rejected", failed_phase="commit",
+            detail=detail)
+        _log(workspace_root, "rejection", round_id=round_id, rj_id=rj_id,
+             reason_class="hook-rejected", failed_phase="commit")
+        # Emit the commit/round_end log lines BEFORE commit_rejection so they
+        # are captured by the same commit (which stages actions.jsonl); this
+        # leaves the worktree clean for the next round's assert_clean_worktree.
+        _log(workspace_root, "commit", round_id=round_id,
+             action="hook-rejected")
+        _log(workspace_root, "round_end", round_id=round_id,
+             verdict="hook-rejected")
+        round_ledger.commit_rejection(
+            workspace_root, action="hook-rejected", round_id=round_id,
+            variant_id=variant_id, rj_id=rj_id, reason="hook-rejected")
+        return RoundOutcome(
+            round_id=round_id, variant_id=variant_id,
+            verdict="hook-rejected", reason="hook-rejected", rj_id=rj_id,
+            elapsed_seconds=time.monotonic() - start_ts,
+            spawn_counts=spawn_counts)
 
     # ---- Phase 1: Planner ----
     planner_ctx = context_mod.build_planner_context(
@@ -787,10 +825,13 @@ def run_round(
             new_decisions=approved_proposals,
             decisions_json_path=decisions_json_path,
         )
-        round_ledger.commit_register_decision(
-            workspace_root,
-            new_decision_ids=[p["id"] for p in approved_proposals],
-        )
+        try:
+            round_ledger.commit_register_decision(
+                workspace_root,
+                new_decision_ids=[p["id"] for p in approved_proposals],
+            )
+        except subprocess.CalledProcessError as exc:
+            return _commit_reject(exc)
         _log(workspace_root, "commit", round_id=round_id,
              action="register-decision")
 
@@ -838,17 +879,23 @@ def run_round(
             registry_path.write_text(json.dumps(
                 registry.to_dict(), indent=2, sort_keys=True,
             ))
-            round_ledger.commit_canonicalize(workspace_root, all_rewrites)
+            try:
+                round_ledger.commit_canonicalize(workspace_root, all_rewrites)
+            except subprocess.CalledProcessError as exc:
+                return _commit_reject(exc)
             _log(workspace_root, "commit", round_id=round_id,
                  action="canonicalize")
 
     # ---- Phase 8: Final merge commit ----
-    round_ledger.commit_merge(
-        workspace_root, round_id=round_id, variant_id=variant_id,
-        section_paths=section_paths, claim_paths=claim_paths,
-        attack_paths=attack_paths, evidence_paths=evidence_paths,
-        score_delta=score_delta, scorecard_path=sc_rel,
-    )
+    try:
+        round_ledger.commit_merge(
+            workspace_root, round_id=round_id, variant_id=variant_id,
+            section_paths=section_paths, claim_paths=claim_paths,
+            attack_paths=attack_paths, evidence_paths=evidence_paths,
+            score_delta=score_delta, scorecard_path=sc_rel,
+        )
+    except subprocess.CalledProcessError as exc:
+        return _commit_reject(exc)
     _log(workspace_root, "commit", round_id=round_id, action="merge")
     _log(workspace_root, "round_end", round_id=round_id, verdict="merge")
 

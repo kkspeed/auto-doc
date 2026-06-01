@@ -30,6 +30,25 @@ def _scaffold_workspace(target: Path):
     )
 
 
+def _commit_setup(ws: Path, message: str = "test: seed round setup"):
+    """Stage + commit any non-ignored setup files a test wrote after scaffold,
+    so run_round's assert_clean_worktree guard sees a clean tree. derived/ is
+    gitignored and intentionally excluded. Uses --no-verify because some tests
+    deliberately seed a section the content hooks would reject (e.g. an
+    intentional dangling cite that run_round's verifiers are meant to catch);
+    the clean-worktree guard only requires a clean tree, not hook-passing
+    content."""
+    subprocess.check_call(["git", "-C", str(ws), "add", "-A"])
+    if subprocess.run(
+            ["git", "-C", str(ws), "diff", "--cached", "--quiet"]
+    ).returncode != 0:
+        subprocess.check_call(
+            ["git", "-c", "user.email=harness@localhost",
+             "-c", "user.name=harness", "-C", str(ws),
+             "commit", "-q", "--no-verify",
+             "-m", f"{message}\n\nAction: init\n"])
+
+
 def _harness_config():
     return {
         "models": {
@@ -293,6 +312,7 @@ class RunRoundVerifierAFailureTest(unittest.TestCase):
             '+++\nsection_id = "retry-policy"\ntags = ["decided"]\n+++\n'
             'Uncited assertion.\n'
         )
+        _commit_setup(self.ws)
         # No designer evidence; the section is pre-existing
         designer = _designer_ok(claims=[
             {"id": "cl-000001", "section_id": "retry-policy",
@@ -317,6 +337,7 @@ class RunRoundVerifierAFailureTest(unittest.TestCase):
             '+++\nsection_id = "retry-policy"\ntags = ["decided"]\n+++\n'
             'Assertion with bad cite [^ev-999999].\n'
         )
+        _commit_setup(self.ws)
         # Designer's evidence list is empty — cite resolves to nothing
         designer = _designer_ok(claims=[
             {"id": "cl-000001", "section_id": "retry-policy",
@@ -364,6 +385,7 @@ class RunRoundVerifierBFailureTest(unittest.TestCase):
             '+++\nsection_id = "retry-policy"\ntags = ["decided"]\n+++\n'
             'Use expo-backoff with full jitter [^ev-000001].\n'
         )
+        _commit_setup(self.ws)
         designer = _designer_ok(
             evidence=[{
                 "id": "ev-000001",
@@ -732,6 +754,7 @@ class RunRoundFlowCTest(unittest.TestCase):
             "evidence_ids": [], "assertion": "x",
             "position": "exponential-backoff",
         }, indent=2))
+        _commit_setup(self.ws)
 
     def tearDown(self):
         shutil.rmtree(self.td, ignore_errors=True)
@@ -934,6 +957,29 @@ class BadAttackRejectsNotCrashTest(unittest.TestCase):
             outcome = orchestrator.run_round(
                 self.ws, _harness_config(), "round-000001", "v-001")
         self.assertEqual(outcome.verdict, "reviewer-rejected")
+
+
+class FreshInitRoundReachesMergeTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)  # init bootstraps decisions.json; NO manual seeding
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_round_merges_without_manual_decision_seeding(self):
+        claim = {"id": "cl-000001", "section_id": "retry-policy",
+                 "decision_id": "retry-policy", "claim_type": "decision",
+                 "evidence_ids": [], "assertion": "Use expo-backoff.",
+                 "position": "expo-backoff"}
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[claim]),
+            _reviewer_ok(), _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "merge")
 
 
 if __name__ == "__main__":
