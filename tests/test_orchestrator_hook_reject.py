@@ -71,8 +71,10 @@ class HookRejectResetTest(unittest.TestCase):
         # Second round runs to a terminal verdict without raising
         # DirtyWorktreeError on the start guard, and also leaves a clean tree.
         with mock.patch("harness.orchestrator.spawn_role", side_effect=[
-            _planner_ok(), _designer_ok(claims=[claim2]),
-            _reviewer_ok(), _verifier_c_ok()]):
+            _planner_ok(round_id="round-000002"),
+            _designer_ok(round_id="round-000002", claims=[claim2]),
+            _reviewer_ok(round_id="round-000002"),
+            _verifier_c_ok(round_id="round-000002")]):
             o2 = orchestrator.run_round(
                 self.ws, _harness_config(), "round-000002", "v-001")
         self.assertIn(o2.verdict, {"merge", "score-regression"})
@@ -94,8 +96,10 @@ class HookRejectResetTest(unittest.TestCase):
         self.assertEqual(st.strip(), "", "tree dirty after _reject")
         # Next round runs without DirtyWorktreeError.
         with mock.patch("harness.orchestrator.spawn_role", side_effect=[
-            _planner_ok(), _designer_ok(claims=[dict(_RETRY_CLAIM)]),
-            _reviewer_ok(), _verifier_c_ok()]):
+            _planner_ok(round_id="round-000002"),
+            _designer_ok(round_id="round-000002", claims=[dict(_RETRY_CLAIM)]),
+            _reviewer_ok(round_id="round-000002"),
+            _verifier_c_ok(round_id="round-000002")]):
             o2 = orchestrator.run_round(
                 self.ws, _harness_config(), "round-000002", "v-001")
         self.assertEqual(o2.verdict, "merge")

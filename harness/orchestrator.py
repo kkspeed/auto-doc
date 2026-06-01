@@ -233,7 +233,7 @@ VERIFIER_C_PROMPT = (
 
 
 def _materialize_designer_output(
-    workspace_root: Path, variant_id: str, parsed: dict,
+    workspace_root: Path, variant_id: str, round_id: str, parsed: dict,
 ) -> tuple[list[Path], list[str], list[str], list[str], list[str]]:
     """Materialize designer's parsed output to disk.
 
@@ -324,7 +324,8 @@ def _materialize_designer_output(
 
     # Write the round's patch.diff pointer (always, even when empty) so
     # Reviewer/Verifier-C CONTEXT.md can point at a stable on-disk file.
-    round_dir = workspace_root / "rounds" / parsed.get("round", "")
+    # Use the TRUSTED round_id (caller-supplied) not the agent-reported value.
+    round_dir = workspace_root / "rounds" / round_id
     round_dir.mkdir(parents=True, exist_ok=True)
     (round_dir / "patch.diff").write_text(patch_diff, encoding="utf-8")
 
@@ -543,10 +544,20 @@ def run_round(
          verdict=designer_result.verdict,
          retry_count=designer_result.retry_count,
          elapsed_seconds=designer_result.elapsed_seconds)
+    dparsed = designer_result.parsed
+    if dparsed.get("round") != round_id or dparsed.get("variant") != variant_id:
+        return _reject(
+            action="phase-a-fail",
+            reason_class="cross-field-fail",
+            failed_phase="designer",
+            detail=(f"designer round/variant mismatch: got "
+                    f"round={dparsed.get('round')!r} variant="
+                    f"{dparsed.get('variant')!r}, expected "
+                    f"round={round_id!r} variant={variant_id!r}"))
     try:
         materialized, section_paths, claim_paths, _att_unused, evidence_paths = \
             _materialize_designer_output(
-                workspace_root, variant_id, designer_result.parsed,
+                workspace_root, variant_id, round_id, designer_result.parsed,
             )
     except RuntimeError as e:
         return _reject(

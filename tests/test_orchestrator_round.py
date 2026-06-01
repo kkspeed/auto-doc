@@ -761,7 +761,7 @@ class RunRoundFlowCTest(unittest.TestCase):
 
     def test_high_confidence_canonicalization_triggers_canonicalize_commit_before_merge(self):
         # Reviewer proposes canonicalizing exponential-backoff → expo-backoff
-        reviewer = _reviewer_ok(attacks=[{
+        reviewer = _reviewer_ok(round_id="round-000002", attacks=[{
             "id": "at-000001",
             "at_type": "propose_canonicalization",
             "kind": "position", "scope": "retry-policy",
@@ -769,7 +769,10 @@ class RunRoundFlowCTest(unittest.TestCase):
             "confidence": "high", "rationale": "both mean the same",
         }])
         with mock.patch("harness.orchestrator.spawn_role", side_effect=[
-            _planner_ok(), _designer_ok(claims=[]), reviewer, _verifier_c_ok(),
+            _planner_ok(round_id="round-000002"),
+            _designer_ok(round_id="round-000002", claims=[]),
+            reviewer,
+            _verifier_c_ok(round_id="round-000002"),
         ]):
             outcome = orchestrator.run_round(
                 self.ws, _harness_config(),
@@ -795,7 +798,7 @@ class RunRoundFlowCTest(unittest.TestCase):
         self.assertEqual(cl["position"], "expo-backoff")
 
     def test_medium_confidence_canonicalization_skipped_for_v0(self):
-        reviewer = _reviewer_ok(attacks=[{
+        reviewer = _reviewer_ok(round_id="round-000002", attacks=[{
             "id": "at-000001",
             "at_type": "propose_canonicalization",
             "kind": "position", "scope": "retry-policy",
@@ -803,7 +806,10 @@ class RunRoundFlowCTest(unittest.TestCase):
             "confidence": "medium", "rationale": "may be the same",
         }])
         with mock.patch("harness.orchestrator.spawn_role", side_effect=[
-            _planner_ok(), _designer_ok(claims=[]), reviewer, _verifier_c_ok(),
+            _planner_ok(round_id="round-000002"),
+            _designer_ok(round_id="round-000002", claims=[]),
+            reviewer,
+            _verifier_c_ok(round_id="round-000002"),
         ]):
             outcome = orchestrator.run_round(
                 self.ws, _harness_config(),
@@ -873,7 +879,7 @@ class MaterializeFailLoudTest(unittest.TestCase):
                   "claims": []}
         with self.assertRaises(RuntimeError):
             orchestrator._materialize_designer_output(
-                self.ws, "v-001", parsed)
+                self.ws, "v-001", "round-000001", parsed)
 
     def test_duplicate_claim_id_raises(self):
         c = {"id": "cl-000001", "decision_id": "retry-policy",
@@ -884,12 +890,12 @@ class MaterializeFailLoudTest(unittest.TestCase):
                   "claims": [dict(c), dict(c)]}
         with self.assertRaises(RuntimeError):
             orchestrator._materialize_designer_output(
-                self.ws, "v-001", parsed)
+                self.ws, "v-001", "round-000001", parsed)
 
     def test_patch_diff_file_written(self):
         parsed = {"round": "round-000001", "variant": "v-001",
                   "patch_diff": "", "evidence": [], "claims": []}
-        orchestrator._materialize_designer_output(self.ws, "v-001", parsed)
+        orchestrator._materialize_designer_output(self.ws, "v-001", "round-000001", parsed)
         self.assertTrue(
             (self.ws / "rounds" / "round-000001" / "patch.diff").exists())
 
@@ -902,7 +908,7 @@ class MaterializeFailLoudTest(unittest.TestCase):
     def test_patch_diff_empty_content(self):
         parsed = {"round": "round-000001", "variant": "v-001",
                   "patch_diff": "", "evidence": [], "claims": []}
-        orchestrator._materialize_designer_output(self.ws, "v-001", parsed)
+        orchestrator._materialize_designer_output(self.ws, "v-001", "round-000001", parsed)
         content = (self.ws / "rounds" / "round-000001"
                    / "patch.diff").read_text()
         self.assertEqual(content, "")
@@ -1024,6 +1030,49 @@ class RegistryMaintenanceTest(unittest.TestCase):
         log = subprocess.check_output(
             ["git", "-C", str(self.ws), "log", "--format=%B"]).decode()
         self.assertNotIn("Action: registry-sync", log)
+
+
+class DesignerRoundVariantGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_wrong_round_is_rejected(self):
+        claim = {"id": "cl-000001", "section_id": "retry-policy",
+                 "decision_id": "retry-policy", "claim_type": "decision",
+                 "evidence_ids": [], "assertion": "x", "position": "expo"}
+        bad = _designer_ok(claims=[claim])
+        bad.parsed["round"] = "round-999999"
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+                _planner_ok(), bad, _reviewer_ok(), _verifier_c_ok()]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertNotEqual(outcome.verdict, "merge")
+        self.assertEqual(outcome.reason, "cross-field-fail")
+
+
+class MaterializePatchDiffRoundTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_patch_diff_written_under_trusted_round_id(self):
+        parsed = {"round": "round-999999", "variant": "v-001",
+                  "patch_diff": "", "evidence": [], "claims": []}
+        orchestrator._materialize_designer_output(
+            self.ws, "v-001", "round-000007", parsed)
+        self.assertTrue(
+            (self.ws / "rounds" / "round-000007" / "patch.diff").exists())
+        self.assertFalse(
+            (self.ws / "rounds" / "round-999999" / "patch.diff").exists())
 
 
 if __name__ == "__main__":
