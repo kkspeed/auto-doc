@@ -357,5 +357,22 @@ class ContextClaimPointersTest(unittest.TestCase):
         self.assertIn("variants/nodes/v-001/claims/", out)
 
 
+class PlannerContextPointersTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        _write_goal_toml(self.td)
+        _write_decisions(self.td, {})
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_planner_has_goal_and_pointers(self):
+        out = context.build_planner_context(self.td, "round-000001", "v-001")
+        self.assertIn("Read these first", out)
+        self.assertIn("goal.toml", out)
+        self.assertIn("variants/nodes/v-001/doc/", out)
+        self.assertIn("test", out)  # goal title from _write_goal_toml
+
+
 if __name__ == "__main__":
     unittest.main()

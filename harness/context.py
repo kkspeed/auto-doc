@@ -203,6 +203,13 @@ def build_planner_context(workspace_root: Path, round_id: str,
     decisions = _load_decisions(workspace_root)
     goal_version = _load_goal_version(workspace_root)
     out = [_header("planner", round_id, variant_id, goal_version), ""]
+    title, description = _load_goal_meta(workspace_root)
+    out.append(_render_goal_and_pointers(
+        title, description, [
+            "goal.toml",
+            f"variants/nodes/{variant_id}/doc/",
+            "rejections/",
+        ]))
     out.append(_render_registered_decisions(decisions))
     # Stale proposals section is omitted when empty (per spec); we don't have
     # introduced_round tracking in this sub-project, so skip the section.
