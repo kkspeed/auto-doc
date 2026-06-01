@@ -110,3 +110,16 @@ Captured by `/plan-eng-review` on 2026-05-21. Each entry includes enough context
 **Cons:** Adds a nested try/except in the rejection path; "what to do when even the rejection can't commit" needs a deliberate degraded-mode design (STOPPED.md vs. raise-with-context).
 **Context:** Final review of the harness-trustworthiness remediation (2026-05-31), Minor issue M1; spec §5.2 accepted it as a v0 limit.
 **Depends on / blocked by:** Pairs naturally with sub-project 6 (crash recovery / harness resume).
+
+---
+
+## 9. Decide fail-loud vs degrade for `_load_goal_meta` on malformed goal.toml
+
+**What:** `context._load_goal_meta` (harness/context.py) catches `TOMLDecodeError` and returns `("", "")`, so all four role contexts render a degraded empty `## Goal` block instead of surfacing a malformed goal.toml. This is inconsistent with remediation-round-2 fix #5, which made `bootstrap.rebuild_decisions_cache` fail loud on the same input. Decide deliberately: either (a) accept the degrade for read-only per-spawn context (a transiently-malformed goal.toml shouldn't crash a round mid-flight), and document the rationale; or (b) fail loud for consistency. In practice the cache rebuild at run_loop/round start already fails loud on a malformed goal.toml before any context is built, so (a) is probably fine — but the divergence should be a conscious choice, not an accident.
+
+**Why:** Minor consistency/observability concern flagged by the final cross-cutting review of remediation round 2 (2026-06-01). Low blast radius: the load-bearing validation path (cache rebuild) already fails loud, so context is only reached on a valid goal.toml in normal operation.
+
+**Pros:** Removes an inconsistency in the fail-loud story; makes the degrade (if kept) intentional + documented.
+**Cons:** Failing loud in context rendering could crash a round on a transiently-malformed goal.toml that the human is mid-edit on; the degrade may genuinely be the better choice for read-only context.
+**Context:** Final review of remediation round 2 (2026-06-01), Minor issue.
+**Depends on / blocked by:** Nothing; standalone judgment call.
