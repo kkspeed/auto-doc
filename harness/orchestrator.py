@@ -451,6 +451,12 @@ def run_round(
                        capture_output=True, text=True)
         subprocess.run(["git", "-C", str(workspace_root), "clean", "-fd"],
                        capture_output=True, text=True)
+        # The reset rolls back goal.toml; the derived/decisions.json cache is now
+        # inconsistent with it (deleted if register_decision force-committed it
+        # this round, or stale if it was an ignored write). Re-derive the cache
+        # from the rolled-back goal.toml so the next round validates against the
+        # true registry.
+        bootstrap.rebuild_decisions_cache(workspace_root)
         detail = (exc.stderr or "").strip() or "commit failed"
         rj_id = round_ledger.write_rejection(
             workspace_root, round_id, variant_id,

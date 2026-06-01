@@ -99,3 +99,43 @@ class HookRejectResetTest(unittest.TestCase):
             o2 = orchestrator.run_round(
                 self.ws, _harness_config(), "round-000002", "v-001")
         self.assertEqual(o2.verdict, "merge")
+
+
+class CommitRejectRebuildsCacheTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_cache_rebuilt_to_match_goal_toml_after_reset(self):
+        # Designer proposes a NEW decision (registered in Phase 7a, mutating
+        # goal.toml + decisions.json); reviewer approves it; then the merge
+        # commit is forced to fail. After _commit_reject's reset, decisions.json
+        # must NOT contain the proposed decision (goal.toml rolled back -> cache
+        # must too).
+        import json as _json
+        claim = {"id": "cl-000001", "section_id": "new-policy",
+                 "decision_id": "new-policy", "claim_type": "decision",
+                 "evidence_ids": [], "assertion": "x", "position": "some-pos",
+                 "proposed_decision": {"id": "new-policy",
+                                       "question": "New?",
+                                       "rationale": "needed"}}
+        reviewer = _reviewer_ok(decision_proposals=[
+            {"proposed_id": "new-policy", "verdict": "approve",
+             "rationale": "ok"}])
+        def boom(*a, **kw):
+            raise subprocess.CalledProcessError(
+                1, ["git", "commit"], stderr="hook said no")
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+                _planner_ok(), _designer_ok(claims=[claim]),
+                reviewer, _verifier_c_ok()]), \
+             mock.patch("harness.round_ledger.commit_merge", side_effect=boom):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "hook-rejected")
+        cache = _json.loads(
+            (self.ws / "derived" / "decisions.json").read_text())
+        self.assertNotIn("new-policy", cache["decisions"])
