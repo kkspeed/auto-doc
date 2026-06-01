@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from harness import orchestrator, round_ledger
+from harness.spawn import RoleOutput
 from tests.test_orchestrator_round import (
     _scaffold_workspace, _harness_config, _planner_ok, _designer_ok,
     _reviewer_ok, _verifier_c_ok,
@@ -50,3 +51,51 @@ class HookRejectResetTest(unittest.TestCase):
         st = subprocess.check_output(
             ["git", "-C", str(self.ws), "status", "--porcelain"]).decode()
         self.assertEqual(st.strip(), "")
+
+    def test_merge_round_leaves_clean_tree_for_next_round(self):
+        # Round 1 merges. The merge terminal path logs commit/round_end BEFORE
+        # commit_merge, so actions.jsonl is staged into the merge commit and the
+        # worktree is left clean. A second real round must therefore pass its
+        # start-of-round assert_clean_worktree guard (no DirtyWorktreeError).
+        claim1 = dict(_RETRY_CLAIM)
+        claim2 = dict(_RETRY_CLAIM, id="cl-000002", position="expo-backoff")
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[claim1]),
+            _reviewer_ok(), _verifier_c_ok()]):
+            o1 = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(o1.verdict, "merge")
+        st1 = subprocess.check_output(
+            ["git", "-C", str(self.ws), "status", "--porcelain"]).decode()
+        self.assertEqual(st1.strip(), "", "tree dirty after merge")
+        # Second round runs to a terminal verdict without raising
+        # DirtyWorktreeError on the start guard, and also leaves a clean tree.
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[claim2]),
+            _reviewer_ok(), _verifier_c_ok()]):
+            o2 = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000002", "v-001")
+        self.assertIn(o2.verdict, {"merge", "score-regression"})
+        st2 = subprocess.check_output(
+            ["git", "-C", str(self.ws), "status", "--porcelain"]).decode()
+        self.assertEqual(st2.strip(), "", "tree dirty after second round")
+
+    def test_reject_round_then_next_round_clean(self):
+        # A planner failure routes through _reject; the next round's clean
+        # guard must still pass (actions.jsonl left clean).
+        bad_planner = RoleOutput(verdict="spawn-failed", stderr_tail="boom")
+        with mock.patch("harness.orchestrator.spawn_role",
+                        side_effect=[bad_planner]):
+            o1 = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(o1.verdict, "spawn-failed")
+        st = subprocess.check_output(
+            ["git", "-C", str(self.ws), "status", "--porcelain"]).decode()
+        self.assertEqual(st.strip(), "", "tree dirty after _reject")
+        # Next round runs without DirtyWorktreeError.
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[dict(_RETRY_CLAIM)]),
+            _reviewer_ok(), _verifier_c_ok()]):
+            o2 = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000002", "v-001")
+        self.assertEqual(o2.verdict, "merge")

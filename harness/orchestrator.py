@@ -423,14 +423,17 @@ def run_round(
         _log(workspace_root, "rejection",
              round_id=round_id, rj_id=rj_id,
              reason_class=reason_class, failed_phase=failed_phase)
+        # Emit the commit/round_end log lines BEFORE commit_rejection so they
+        # are staged into the same commit (which includes actions.jsonl),
+        # leaving the worktree clean for the next round's start guard.
+        _log(workspace_root, "commit", round_id=round_id, action=action)
+        _log(workspace_root, "round_end",
+             round_id=round_id, verdict=action)
         round_ledger.commit_rejection(
             workspace_root, action=commit_action,
             round_id=round_id, variant_id=variant_id,
             rj_id=rj_id, reason=reason_class, reviewer_id=reviewer_id,
         )
-        _log(workspace_root, "commit", round_id=round_id, action=action)
-        _log(workspace_root, "round_end",
-             round_id=round_id, verdict=action)
         return RoundOutcome(
             round_id=round_id, variant_id=variant_id,
             verdict=action, reason=reason_class, rj_id=rj_id,
@@ -887,6 +890,13 @@ def run_round(
                  action="canonicalize")
 
     # ---- Phase 8: Final merge commit ----
+    # Log terminal events BEFORE the commit so they're staged into the same
+    # merge commit (which includes actions.jsonl), leaving the worktree clean
+    # for the next round's start guard. If commit_merge raises, _commit_reject's
+    # `git reset --hard round_start_sha` erases these premature merge logs
+    # before re-logging hook-rejected, so the audit trail stays correct.
+    _log(workspace_root, "commit", round_id=round_id, action="merge")
+    _log(workspace_root, "round_end", round_id=round_id, verdict="merge")
     try:
         round_ledger.commit_merge(
             workspace_root, round_id=round_id, variant_id=variant_id,
@@ -896,8 +906,6 @@ def run_round(
         )
     except subprocess.CalledProcessError as exc:
         return _commit_reject(exc)
-    _log(workspace_root, "commit", round_id=round_id, action="merge")
-    _log(workspace_root, "round_end", round_id=round_id, verdict="merge")
 
     return RoundOutcome(
         round_id=round_id, variant_id=variant_id, verdict="merge",

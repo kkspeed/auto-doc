@@ -1,6 +1,7 @@
 CONTEXT.md
 derived/
 rounds/*/scratch/
+rounds/*/patch.diff
 *.tmp
 repo/
 sources/*/cache/
