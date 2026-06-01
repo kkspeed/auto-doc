@@ -1047,8 +1047,21 @@ class DesignerRoundVariantGuardTest(unittest.TestCase):
                  "evidence_ids": [], "assertion": "x", "position": "expo"}
         bad = _designer_ok(claims=[claim])
         bad.parsed["round"] = "round-999999"
-        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
-                _planner_ok(), bad, _reviewer_ok(), _verifier_c_ok()]):
+        with mock.patch("harness.orchestrator.spawn_role",
+                        side_effect=[_planner_ok(), bad]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertNotEqual(outcome.verdict, "merge")
+        self.assertEqual(outcome.reason, "cross-field-fail")
+
+    def test_wrong_variant_is_rejected(self):
+        claim = {"id": "cl-000001", "section_id": "retry-policy",
+                 "decision_id": "retry-policy", "claim_type": "decision",
+                 "evidence_ids": [], "assertion": "x", "position": "expo"}
+        bad = _designer_ok(claims=[claim])
+        bad.parsed["variant"] = "v-999"
+        with mock.patch("harness.orchestrator.spawn_role",
+                        side_effect=[_planner_ok(), bad]):
             outcome = orchestrator.run_round(
                 self.ws, _harness_config(), "round-000001", "v-001")
         self.assertNotEqual(outcome.verdict, "merge")
