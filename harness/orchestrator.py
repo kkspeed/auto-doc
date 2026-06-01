@@ -900,12 +900,20 @@ def run_loop(
     bootstrap.assert_clean_worktree(workspace_root)
     bootstrap.rebuild_decisions_cache(workspace_root)
     bootstrap.ensure_empty_registry(workspace_root)
+    # Rebuild the derived decision cache, ensure the registry baseline, and
+    # seed each variant's document from seed_doc.md before the first round —
+    # all on a worktree we've asserted is clean.
     seeded = bootstrap.seed_variant_docs(workspace_root, variant_count)
     if seeded:
-        round_ledger._git_add(workspace_root, *seeded)
-        round_ledger._git_commit(
-            workspace_root,
-            "harness: seed variant documents\n\nAction: init\n")
+        try:
+            round_ledger._git_add(workspace_root, *seeded)
+            round_ledger._git_commit(
+                workspace_root,
+                "harness: seed variant documents\n\nAction: init\n")
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "seed-variant commit failed (check hooks/commit-msg): "
+                f"{(exc.stderr or '').strip()}") from exc
 
     loop_start = time.monotonic()
     outcomes: list[RoundOutcome] = []
