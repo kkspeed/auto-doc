@@ -27,6 +27,7 @@ from harness import round_ledger
 from harness import verifiers
 from harness import scorecard as scorecard_mod
 from harness import morning_brief as morning_brief_mod
+from harness import bootstrap
 from harness.round_ledger import _ALLOWED_REASONS
 from harness.spawn import RoleOutput, spawn_role
 
@@ -896,6 +897,16 @@ def run_loop(
             "max_wall_clock_hours"
         )
 
+    bootstrap.assert_clean_worktree(workspace_root)
+    bootstrap.rebuild_decisions_cache(workspace_root)
+    bootstrap.ensure_empty_registry(workspace_root)
+    seeded = bootstrap.seed_variant_docs(workspace_root, variant_count)
+    if seeded:
+        round_ledger._git_add(workspace_root, *seeded)
+        round_ledger._git_commit(
+            workspace_root,
+            "harness: seed variant documents\n\nAction: init\n")
+
     loop_start = time.monotonic()
     outcomes: list[RoundOutcome] = []
     next_n = _next_round_number(workspace_root)
@@ -914,6 +925,8 @@ def run_loop(
             workspace_root, harness_config, round_id, variant_id,
         )
         outcomes.append(outcome)
+        if outcome.verdict == "merge":
+            bootstrap.rebuild_decisions_cache(workspace_root)
         next_n += 1
 
     brief = morning_brief_mod.render_morning_brief(workspace_root, start_sha)

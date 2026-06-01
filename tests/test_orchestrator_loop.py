@@ -197,5 +197,34 @@ class RunLoopBriefTest(unittest.TestCase):
         self.assertIn("# Morning brief", brief.read_text())
 
 
+class RunLoopBootstrapTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_seeds_variants_and_cache_at_start(self):
+        def fake_run_round(workspace_root, harness_config, round_id, variant_id):
+            return orchestrator.RoundOutcome(
+                round_id=round_id, variant_id=variant_id,
+                verdict="spawn-failed", elapsed_seconds=0.01)
+        with mock.patch("harness.orchestrator.run_round",
+                        side_effect=fake_run_round):
+            orchestrator.run_loop(self.ws, _harness_config(),
+                                  max_rounds=1, variant_count=2)
+        self.assertTrue((self.ws / "derived" / "decisions.json").exists())
+        self.assertTrue((self.ws / "variants" / "nodes" / "v-001" / "doc"
+                         / "00-overview.md").exists())
+
+    def test_aborts_on_dirty_worktree(self):
+        from harness import bootstrap
+        (self.ws / "stray.txt").write_text("dirty")
+        with self.assertRaises(bootstrap.DirtyWorktreeError):
+            orchestrator.run_loop(self.ws, _harness_config(), max_rounds=1)
+
+
 if __name__ == "__main__":
     unittest.main()
