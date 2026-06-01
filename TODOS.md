@@ -82,3 +82,29 @@ Captured by `/plan-eng-review` on 2026-05-21. Each entry includes enough context
 **Cons:** Requires gathering live detector inputs from `derived/` state scoped to the run; some detectors need the full claim graph loaded, which adds I/O to brief rendering.
 **Context:** Sub-project 5 plan (2026-05-31), Task 8 documented v0 scope line; final review Minor issue 5.
 **Depends on / blocked by:** Nothing; the detectors and renderers already exist.
+
+---
+
+## 7. Validate designer round/variant equality; use trusted round_id for patch.diff path
+
+**What:** `_materialize_designer_output` (harness/orchestrator.py) writes the round's context pointer to `rounds/{parsed["round"]}/patch.diff` using the agent-supplied `round` field, while the Reviewer/Verifier-C context pointers (harness/context.py) point at `rounds/{round_id}/patch.diff` using the trusted orchestrator `round_id`. If a designer returns a stale or empty `round`, patch.diff lands in the wrong directory and the reviewer's on-disk pointer 404s — silently defeating the "agents can see their work" fix for that round. The remediation spec §7.1 called for `validate_designer_json` to assert `d["round"]`/`d["variant"]` equal the round's, but the implemented validator only checks presence. Fix: either thread the trusted `round_id` into `_materialize_designer_output` and use it for the patch.diff path, or add a round/variant equality check (requires passing the expected round_id/variant_id into the validator).
+
+**Why:** Low blast radius today (the path is gitignored, and a well-behaved agent returns the correct round), so the happy path is unaffected — but it's a real robustness/audit gap in a harness whose entire premise is that agents see exactly the right material. Found by the final cross-cutting review of the harness-trustworthiness remediation (2026-05-31), Important issue I1.
+
+**Pros:** Closes the pointer-404 robustness gap; fully honors spec §7.1; makes a misbehaving designer fail loud rather than silently starve the reviewer.
+**Cons:** Threading round_id into the validator changes its signature (spawn_role calls validators with just the parsed dict), so the equality-check variant needs a small closure/partial; the patch.diff-path variant is simpler. A few test call sites of `_materialize_designer_output` would gain a round_id arg.
+**Context:** Final review of the harness-trustworthiness remediation (2026-05-31), issue I1.
+**Depends on / blocked by:** Nothing; standalone.
+
+---
+
+## 8. Guard the degenerate double-failure in the commit-rejection path
+
+**What:** `run_round`'s `_commit_reject` (and the sibling `_reject`) records a rejection by committing `rejections/rj-*.md` + `actions.jsonl`. If that rejection commit ITSELF fails its hooks (e.g. a misconfigured commit-msg hook), the `CalledProcessError` propagates out of `run_round` → `run_loop` dies. The remediation spec §5.2 accepts this as a v0 limit. Harden it: catch a failure of the rejection commit and degrade gracefully (e.g. write a `STOPPED.md` with the error and return a terminal outcome) rather than crashing the overnight loop.
+
+**Why:** The rejection commit stages only two low-risk files and should always pass, so this is a genuinely degenerate case — but "the harness crashes if the hook is misconfigured" is exactly the class of failure this sub-project set out to eliminate. A belt-and-suspenders guard makes the overnight loop survivable even under hook misconfiguration.
+
+**Pros:** Removes the last uncaught-crash path in the round state machine; aligns with the overnight-autonomy invariant.
+**Cons:** Adds a nested try/except in the rejection path; "what to do when even the rejection can't commit" needs a deliberate degraded-mode design (STOPPED.md vs. raise-with-context).
+**Context:** Final review of the harness-trustworthiness remediation (2026-05-31), Minor issue M1; spec §5.2 accepted it as a v0 limit.
+**Depends on / blocked by:** Pairs naturally with sub-project 6 (crash recovery / harness resume).
