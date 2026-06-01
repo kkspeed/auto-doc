@@ -269,6 +269,10 @@ def _materialize_designer_output(
         text = "+++\n" + "\n".join(fm_lines) + "\n+++\n\n" + \
                str(ev.get("excerpt", "")) + "\n"
         ev_path = evidence_dir / f"{ev_id}.md"
+        if ev_path.exists():
+            raise RuntimeError(
+                f"materialize: evidence id {ev_id!r} already exists on disk "
+                "(append-only ledger violation)")
         ev_path.write_text(text)
         materialized.append(ev_path)
         evidence_paths.append(f"evidence/{ev_id}.md")
@@ -287,6 +291,10 @@ def _materialize_designer_output(
                 f"materialize: duplicate claim id {cl_id!r} in round")
         seen_claim_ids.add(cl_id)
         cl_path = claims_dir / f"{cl_id}.json"
+        if cl_path.exists():
+            raise RuntimeError(
+                f"materialize: claim id {cl_id!r} already exists on disk "
+                "(append-only ledger violation)")
         cl_path.write_text(json.dumps(claim, indent=2, sort_keys=True))
         materialized.append(cl_path)
         claim_paths.append(
@@ -347,6 +355,10 @@ def _materialize_reviewer_attacks(
                 f"materialize: malformed/unsafe attack id {at_id!r}")
         attacks_dir.mkdir(parents=True, exist_ok=True)
         at_path = attacks_dir / f"{at_id}.json"
+        if at_path.exists():
+            raise RuntimeError(
+                f"materialize: attack id {at_id!r} already exists on disk "
+                "(append-only ledger violation)")
         at_path.write_text(json.dumps(at, indent=2, sort_keys=True))
         materialized.append(at_path)
         attack_paths.append(

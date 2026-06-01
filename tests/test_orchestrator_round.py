@@ -1088,5 +1088,50 @@ class MaterializePatchDiffRoundTest(unittest.TestCase):
             (self.ws / "rounds" / "round-999999" / "patch.diff").exists())
 
 
+class MaterializeNoOverwriteTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_existing_evidence_id_raises(self):
+        ev_dir = self.ws / "evidence"
+        ev_dir.mkdir(parents=True, exist_ok=True)
+        (ev_dir / "ev-000001.md").write_text("+++\nid = \"ev-000001\"\n+++\n")
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": "", "claims": [],
+                  "evidence": [{"id": "ev-000001", "confidence": "high",
+                                "citations": [], "claim": "c", "excerpt": "e"}]}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", "round-000001", parsed)
+
+    def test_existing_claim_id_raises(self):
+        cl_dir = self.ws / "variants" / "nodes" / "v-001" / "claims"
+        cl_dir.mkdir(parents=True, exist_ok=True)
+        (cl_dir / "cl-000001.json").write_text("{}")
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": "", "evidence": [],
+                  "claims": [{"id": "cl-000001", "section_id": "retry-policy",
+                              "decision_id": "retry-policy",
+                              "claim_type": "decision", "position": "expo",
+                              "evidence_ids": []}]}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", "round-000001", parsed)
+
+    def test_existing_attack_id_raises(self):
+        at_dir = self.ws / "variants" / "nodes" / "v-001" / "attacks"
+        at_dir.mkdir(parents=True, exist_ok=True)
+        (at_dir / "at-000001.json").write_text("{}")
+        parsed = {"attacks": [{"id": "at-000001", "at_type": "dispute_claim"}]}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_reviewer_attacks(
+                self.ws, "v-001", parsed)
+
+
 if __name__ == "__main__":
     unittest.main()
