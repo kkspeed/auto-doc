@@ -908,10 +908,9 @@ def run_round(
             continue
         try:
             cg.add_canonical_position(reg_sync, decision_id, position)
-        except cg.RegistryInvariantError:
-            # slug is already an alias for this decision (append-only
-            # invariant); it's already represented, so skip.
-            pass
+        except cg.RegistryInvariantError as e:
+            _log(workspace_root, "registry_sync_skip", round_id=round_id,
+                 decision_id=decision_id, slug=position, reason=str(e))
     if json.dumps(reg_sync.to_dict(), sort_keys=True) != before:
         reg_sync_path.parent.mkdir(parents=True, exist_ok=True)
         reg_sync_path.write_text(json.dumps(

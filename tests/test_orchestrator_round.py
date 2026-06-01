@@ -1011,6 +1011,20 @@ class RegistryMaintenanceTest(unittest.TestCase):
             ["git", "-C", str(self.ws), "log", "--format=%B"]).decode()
         self.assertIn("Action: registry-sync", log)
 
+    def test_noop_round_produces_no_registry_sync_commit(self):
+        # A designer that authors no decision claim must not create a
+        # registry-sync commit (before == after).
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[]),
+            _reviewer_ok(), _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "merge")
+        log = subprocess.check_output(
+            ["git", "-C", str(self.ws), "log", "--format=%B"]).decode()
+        self.assertNotIn("Action: registry-sync", log)
+
 
 if __name__ == "__main__":
     unittest.main()
