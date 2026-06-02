@@ -11,6 +11,9 @@ Scenarios:
                   then {"ok": true} and exit 0
   hang          — read stdin, then sleep forever
   validate_fail — write {"wrong_field": "x"} to stdout, exit 0
+  claude_json_envelope
+                — write a Claude Code --output-format json envelope whose
+                  result field contains the assistant JSON text
   transient     — first invocation exit 1; second invocation exit 0 with {"ok": true}.
                   Uses --marker-file to track invocation count across runs.
 """
@@ -60,6 +63,22 @@ def main():
             time.sleep(60)
     elif args.scenario == "validate_fail":
         print(json.dumps({"wrong_field": "x"}))
+        sys.exit(0)
+    elif args.scenario == "claude_json_envelope":
+        role_json = {
+            "round": "round-000001",
+            "variant": "v-001",
+            "stance": "test",
+            "intent": "test",
+            "target_sections": [],
+        }
+        envelope = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": json.dumps(role_json),
+        }
+        print(json.dumps(envelope))
         sys.exit(0)
     elif args.scenario == "transient":
         if not args.marker_file:

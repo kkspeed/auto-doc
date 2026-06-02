@@ -219,6 +219,25 @@ _DEFAULT_SILENCE_THRESHOLD_SECONDS = 90
 _NONZERO_RETRY_SLEEP_SECONDS = 30
 
 
+def _loads_role_json(stdout: bytes) -> dict:
+    """Parse a CLI response into the role JSON object.
+
+    Claude Code's `--output-format json` returns an execution envelope whose
+    `result` field contains the assistant's text. The harness validators expect
+    the assistant's role JSON, not the CLI envelope.
+    """
+    parsed = _json.loads(stdout)
+    if (
+        isinstance(parsed, dict)
+        and parsed.get("type") == "result"
+        and isinstance(parsed.get("result"), str)
+    ):
+        parsed = _json.loads(parsed["result"])
+    if not isinstance(parsed, dict):
+        raise ValueError("role output must be a JSON object")
+    return parsed
+
+
 def spawn_role(
     role: str,
     harness_config: dict,
@@ -317,7 +336,7 @@ def spawn_role(
     # trigger the validate-retry-once contract.
     parse_error: Exception | None = None
     try:
-        parsed = _json.loads(parse_target)
+        parsed = _loads_role_json(parse_target)
         if validator is not None:
             validator(parsed)
         return RoleOutput(
@@ -353,7 +372,7 @@ def spawn_role(
             elapsed_seconds=elapsed, retry_count=1,
         )
     try:
-        parsed = _json.loads(result3.stdout)
+        parsed = _loads_role_json(result3.stdout)
         if validator is not None:
             validator(parsed)
         return RoleOutput(

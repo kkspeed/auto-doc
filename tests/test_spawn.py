@@ -178,6 +178,27 @@ class SpawnRoleHappyPathTest(unittest.TestCase):
         self.assertEqual(result.verdict, "ok")
         self.assertEqual(result.parsed, {"wrong_field": "x"})
 
+    def test_spawn_role_unwraps_claude_json_envelope(self):
+        cfg = _make_config("claude_json_envelope")
+
+        def planner_validator(d):
+            for key in ("round", "variant", "stance", "intent",
+                        "target_sections"):
+                if key not in d:
+                    raise ValueError(f"missing {key}")
+
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="", workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+                validator=planner_validator,
+            )
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.retry_count, 0)
+        self.assertEqual(result.parsed["round"], "round-000001")
+        self.assertEqual(result.parsed["target_sections"], [])
+
     def test_spawn_role_writes_context_md_to_round_scratch(self):
         cfg = _make_config("ok")
         ctx = "# planner context\nfoo bar baz"
