@@ -33,7 +33,8 @@ max_wall_clock_hours = 12         # second cap
 # Cadence + scope.
 verifier_c_every = 1              # 1 = every round; raise to reduce Codex spend
 patch_max_sections = 3            # hook rejects round-commits touching >N section files
-spawn_timeout_seconds = 300       # per CLI spawn; round fails with reason: spawn-failed
+spawn_timeout_seconds = 300       # absolute cap per CLI spawn
+silence_timeout_seconds = 300     # cap for no stdout/stderr activity; set <= spawn timeout
 
 
 [claim_graph]

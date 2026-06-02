@@ -79,6 +79,14 @@ def _run_with_heartbeat(
             elapsed_seconds=0.0, verdict="ok",
         )
 
+    def _timeout_stderr_tail(reason: str, existing_tail: str) -> str:
+        note = (
+            f"timeout: {reason} "
+            f"(spawn_timeout_seconds={spawn_timeout_seconds}, "
+            f"silence_timeout_seconds={silence_threshold_seconds})"
+        )
+        return f"{existing_tail}\n{note}".strip() if existing_tail else note
+
     stdout_buf = bytearray()
     stderr_lines: collections.deque = collections.deque(maxlen=_STDERR_TAIL_MAX_LINES)
     last_output_ref = [spawn_start]   # mutable so threads can update; lock-guarded
@@ -139,6 +147,7 @@ def _run_with_heartbeat(
             except subprocess.TimeoutExpired:
                 pass
             verdict = "timeout"
+            timeout_reason = "spawn timeout exceeded"
             break
         with lock:
             silence = now - last_output_ref[0]
@@ -153,6 +162,7 @@ def _run_with_heartbeat(
                 except subprocess.TimeoutExpired:
                     pass
             verdict = "timeout"
+            timeout_reason = "no stdout/stderr activity"
             break
         time.sleep(1)
 
@@ -165,6 +175,9 @@ def _run_with_heartbeat(
     with lock:
         stderr_snapshot = list(stderr_lines)
         stdout_snapshot = bytes(stdout_buf)
+    stderr_tail = "\n".join(stderr_snapshot)
+    if verdict == "timeout":
+        stderr_tail = _timeout_stderr_tail(timeout_reason, stderr_tail)
 
     # Close pipes explicitly to avoid ResourceWarning on killed processes
     for pipe in (proc.stdout, proc.stderr, proc.stdin):
@@ -178,7 +191,7 @@ def _run_with_heartbeat(
     return _RunResult(
         returncode=proc.returncode if proc.returncode is not None else -1,
         stdout=stdout_snapshot,
-        stderr_tail="\n".join(stderr_snapshot),
+        stderr_tail=stderr_tail,
         elapsed_seconds=elapsed,
         verdict=verdict,
     )
@@ -276,8 +289,11 @@ def spawn_role(
         "spawn_timeout_seconds", _DEFAULT_SPAWN_TIMEOUT_SECONDS,
     )
     silence_threshold = run_cfg.get(
-        "_silence_threshold_seconds_for_tests",
-        _DEFAULT_SILENCE_THRESHOLD_SECONDS,
+        "silence_timeout_seconds",
+        run_cfg.get(
+            "_silence_threshold_seconds_for_tests",
+            spawn_timeout,
+        ),
     )
     retry_sleep = run_cfg.get(
         "_retry_sleep_seconds_for_tests", _NONZERO_RETRY_SLEEP_SECONDS,

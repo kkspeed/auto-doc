@@ -441,6 +441,53 @@ class SpawnRoleConfigTest(unittest.TestCase):
         self.assertEqual(result.verdict, "timeout")
         self.assertLess(elapsed, 5)
 
+    def test_silence_timeout_defaults_to_spawn_timeout(self):
+        cfg = {
+            "models": {"planner": {"tool": "claude", "model": "x"}},
+            "run": {"spawn_timeout_seconds": 123},
+        }
+        calls = []
+
+        def fake_run(cmd, stdin_text, spawn_timeout, silence_timeout, cwd=None):
+            calls.append((spawn_timeout, silence_timeout))
+            return spawn._RunResult(
+                returncode=0, stdout=b'{"ok": true}', stderr_tail="",
+                elapsed_seconds=0.0, verdict="ok")
+
+        with mock.patch.object(spawn, "_run_with_heartbeat", fake_run):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="", workspace_root=self.td,
+                round_id="r", variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(calls, [(123, 123)])
+
+    def test_public_silence_timeout_seconds_overrides_default(self):
+        cfg = {
+            "models": {"planner": {"tool": "claude", "model": "x"}},
+            "run": {
+                "spawn_timeout_seconds": 300,
+                "silence_timeout_seconds": 240,
+            },
+        }
+        calls = []
+
+        def fake_run(cmd, stdin_text, spawn_timeout, silence_timeout, cwd=None):
+            calls.append((spawn_timeout, silence_timeout))
+            return spawn._RunResult(
+                returncode=0, stdout=b'{"ok": true}', stderr_tail="",
+                elapsed_seconds=0.0, verdict="ok")
+
+        with mock.patch.object(spawn, "_run_with_heartbeat", fake_run):
+            result = spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md="", prompt="", workspace_root=self.td,
+                round_id="r", variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(calls, [(300, 240)])
+
 
 class SpawnCwdTest(unittest.TestCase):
     def _fake_popen_capture(self):

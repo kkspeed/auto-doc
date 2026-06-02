@@ -229,7 +229,8 @@ max_rounds            = 200   # absolute round cap (overnight targets 100-120)
 max_wall_clock_hours  = 12    # second cap
 verifier_c_every      = 1     # 1 = every round; raise to reduce verifier spend
 patch_max_sections    = 3     # reject round-commits touching more than N sections
-spawn_timeout_seconds = 300   # per CLI spawn; round fails with reason spawn-failed
+spawn_timeout_seconds = 300   # absolute cap per CLI spawn
+silence_timeout_seconds = 300 # cap for no stdout/stderr activity during a spawn
 
 [scorecard]
 regression_tolerance  = 0.05  # a dimension may not drop more than this and still merge

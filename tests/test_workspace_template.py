@@ -76,7 +76,8 @@ class WorkspaceTemplateHarnessTomlTest(unittest.TestCase):
         with path.open("rb") as f:
             data = tomllib.load(f)
         for k in ("max_rounds", "max_wall_clock_hours", "verifier_c_every",
-                  "patch_max_sections", "spawn_timeout_seconds"):
+                  "patch_max_sections", "spawn_timeout_seconds",
+                  "silence_timeout_seconds"):
             self.assertIn(k, data["run"], f"run.{k} missing")
 
     def test_harness_toml_claim_graph_block_has_thresholds(self):
