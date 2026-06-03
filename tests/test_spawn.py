@@ -3,6 +3,7 @@ import io
 import unittest
 from unittest import mock
 
+from harness import orchestrator
 from harness import spawn
 
 
@@ -199,6 +200,40 @@ class SpawnRoleHappyPathTest(unittest.TestCase):
         self.assertEqual(result.parsed["round"], "round-000001")
         self.assertEqual(result.parsed["target_sections"], [])
 
+    def test_spawn_role_unwraps_fenced_json_inside_claude_envelope(self):
+        cfg = _make_config("claude_fenced_json_envelope")
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="designer", harness_config=cfg,
+                context_md="", prompt="", workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.parsed["round"], "round-000001")
+
+    def test_spawn_role_extracts_json_from_claude_envelope_prose(self):
+        cfg = _make_config("claude_prose_json_envelope")
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="designer", harness_config=cfg,
+                context_md="", prompt="", workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+            )
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.parsed["variant"], "v-001")
+
+    def test_spawn_role_validates_designer_payload_inside_claude_envelope(self):
+        cfg = _make_config("claude_designer_json_envelope")
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            result = spawn.spawn_role(
+                role="designer", harness_config=cfg,
+                context_md="", prompt="", workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001",
+                validator=orchestrator.validate_designer_json,
+            )
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.parsed["patch_diff"], "")
+
     def test_spawn_role_writes_context_md_to_round_scratch(self):
         cfg = _make_config("ok")
         ctx = "# planner context\nfoo bar baz"
@@ -276,6 +311,7 @@ class SpawnRoleRetryTest(unittest.TestCase):
             )
         self.assertEqual(result.verdict, "output-parse-fail")
         self.assertEqual(result.retry_count, 1)
+        self.assertIn("missing required field 'ok'", result.stderr_tail)
 
     def test_parse_retry_both_attempts_fail_returns_output_parse_fail(self):
         # Covered by test_nonjson_output_retries above; this is an alias

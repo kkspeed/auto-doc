@@ -14,6 +14,12 @@ Scenarios:
   claude_json_envelope
                 — write a Claude Code --output-format json envelope whose
                   result field contains the assistant JSON text
+  claude_fenced_json_envelope
+                — same envelope, with result as a fenced JSON block
+  claude_prose_json_envelope
+                — same envelope, with result containing prose around JSON
+  claude_designer_json_envelope
+                — Claude Code envelope containing a designer-shaped JSON object
   transient     — first invocation exit 1; second invocation exit 0 with {"ok": true}.
                   Uses --marker-file to track invocation count across runs.
 """
@@ -64,19 +70,38 @@ def main():
     elif args.scenario == "validate_fail":
         print(json.dumps({"wrong_field": "x"}))
         sys.exit(0)
-    elif args.scenario == "claude_json_envelope":
-        role_json = {
-            "round": "round-000001",
-            "variant": "v-001",
-            "stance": "test",
-            "intent": "test",
-            "target_sections": [],
-        }
+    elif args.scenario in {
+        "claude_json_envelope",
+        "claude_fenced_json_envelope",
+        "claude_prose_json_envelope",
+        "claude_designer_json_envelope",
+    }:
+        if args.scenario == "claude_designer_json_envelope":
+            role_json = {
+                "round": "round-000001",
+                "variant": "v-001",
+                "patch_diff": "",
+                "evidence": [],
+                "claims": [],
+            }
+        else:
+            role_json = {
+                "round": "round-000001",
+                "variant": "v-001",
+                "stance": "test",
+                "intent": "test",
+                "target_sections": [],
+            }
+        result_text = json.dumps(role_json)
+        if args.scenario == "claude_fenced_json_envelope":
+            result_text = f"```json\n{result_text}\n```"
+        elif args.scenario == "claude_prose_json_envelope":
+            result_text = f"Here is the JSON:\n{result_text}\nDone."
         envelope = {
             "type": "result",
             "subtype": "success",
             "is_error": False,
-            "result": json.dumps(role_json),
+            "result": result_text,
         }
         print(json.dumps(envelope))
         sys.exit(0)

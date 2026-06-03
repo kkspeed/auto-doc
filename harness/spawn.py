@@ -232,6 +232,46 @@ _DEFAULT_SILENCE_THRESHOLD_SECONDS = 90
 _NONZERO_RETRY_SLEEP_SECONDS = 30
 
 
+def _loads_json_object_from_text(text: str) -> dict:
+    stripped = text.strip()
+    candidates = [stripped]
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 3 and lines[0].startswith("```") and lines[-1] == "```":
+            candidates.append("\n".join(lines[1:-1]).strip())
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            parsed = _json.loads(candidate)
+        except _json.JSONDecodeError as e:
+            last_error = e
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, str):
+            return _loads_json_object_from_text(parsed)
+        raise ValueError("role output must be a JSON object")
+
+    # Last-resort extraction for CLIs/models that wrap the JSON in prose.
+    # JSONDecoder.raw_decode preserves normal JSON string escaping rules, so
+    # braces inside string values do not confuse the scan once a candidate starts.
+    decoder = _json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text[i:])
+        except _json.JSONDecodeError as e:
+            last_error = e
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    if last_error is not None:
+        raise last_error
+    raise ValueError("role output did not contain a JSON object")
+
+
 def _loads_role_json(stdout: bytes) -> dict:
     """Parse a CLI response into the role JSON object.
 
@@ -239,16 +279,32 @@ def _loads_role_json(stdout: bytes) -> dict:
     `result` field contains the assistant's text. The harness validators expect
     the assistant's role JSON, not the CLI envelope.
     """
-    parsed = _json.loads(stdout)
+    stdout_text = stdout.decode("utf-8", errors="replace")
+    parsed = _loads_json_object_from_text(stdout_text)
     if (
         isinstance(parsed, dict)
         and parsed.get("type") == "result"
         and isinstance(parsed.get("result"), str)
     ):
-        parsed = _json.loads(parsed["result"])
-    if not isinstance(parsed, dict):
-        raise ValueError("role output must be a JSON object")
+        if parsed.get("is_error") is True:
+            raise ValueError(
+                "CLI returned error envelope: "
+                f"{parsed.get('result') or parsed.get('api_error_status')}"
+            )
+        return _loads_json_object_from_text(parsed["result"])
     return parsed
+
+
+def _append_diagnostic(existing_tail: str, diagnostic: str) -> str:
+    return f"{existing_tail}\n{diagnostic}".strip() if existing_tail else diagnostic
+
+
+def _write_attempt_files(scratch_dir: Path, role: str, attempt: str,
+                         result: _RunResult) -> None:
+    (scratch_dir / f"{role}.{attempt}.stdout").write_bytes(result.stdout)
+    (scratch_dir / f"{role}.{attempt}.stderr").write_text(
+        result.stderr_tail, encoding="utf-8", errors="replace",
+    )
 
 
 def spawn_role(
@@ -312,6 +368,7 @@ def spawn_role(
         cmd, stdin_text, spawn_timeout, silence_threshold,
         cwd=workspace_root,
     )
+    _write_attempt_files(scratch_dir, role, "attempt1", result1)
     if result1.verdict == "timeout":
         return RoleOutput(
             verdict="timeout", stderr_tail=result1.stderr_tail,
@@ -330,6 +387,7 @@ def spawn_role(
             cmd, stdin_text, spawn_timeout, silence_threshold,
             cwd=workspace_root,
         )
+        _write_attempt_files(scratch_dir, role, "attempt2", result2)
         retry_count = 1
         elapsed += result2.elapsed_seconds
         stderr_tail = result2.stderr_tail
@@ -375,16 +433,20 @@ def spawn_role(
         cmd, retry_stdin, spawn_timeout, silence_threshold,
         cwd=workspace_root,
     )
+    _write_attempt_files(scratch_dir, role, "retry", result3)
     elapsed += result3.elapsed_seconds
     stderr_tail = result3.stderr_tail
+    first_parse_diagnostic = f"first parse/validation error: {parse_error}"
     if result3.verdict == "timeout":
         return RoleOutput(
-            verdict="output-parse-fail", stderr_tail=stderr_tail,
+            verdict="output-parse-fail",
+            stderr_tail=_append_diagnostic(stderr_tail, first_parse_diagnostic),
             elapsed_seconds=elapsed, retry_count=1,
         )
     if result3.returncode != 0:
         return RoleOutput(
-            verdict="output-parse-fail", stderr_tail=stderr_tail,
+            verdict="output-parse-fail",
+            stderr_tail=_append_diagnostic(stderr_tail, first_parse_diagnostic),
             elapsed_seconds=elapsed, retry_count=1,
         )
     try:
@@ -395,8 +457,13 @@ def spawn_role(
             verdict="ok", parsed=parsed, stderr_tail=stderr_tail,
             elapsed_seconds=elapsed, retry_count=1,
         )
-    except Exception:
+    except Exception as e:
+        diagnostic = (
+            f"{first_parse_diagnostic}\n"
+            f"retry parse/validation error: {e}"
+        )
         return RoleOutput(
-            verdict="output-parse-fail", stderr_tail=stderr_tail,
+            verdict="output-parse-fail",
+            stderr_tail=_append_diagnostic(stderr_tail, diagnostic),
             elapsed_seconds=elapsed, retry_count=1,
         )
