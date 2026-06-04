@@ -248,6 +248,28 @@ class SpawnRoleHappyPathTest(unittest.TestCase):
         self.assertTrue(scratch.exists())
         self.assertEqual(scratch.read_text(), ctx)
 
+    def test_spawn_role_logs_full_prompt_and_output_per_attempt(self):
+        # The exact stdin (context + role prompt) and raw stdout must both be
+        # persisted to scratch so a parse failure can be diagnosed from disk.
+        cfg = _make_config("ok")
+        ctx = "# planner context\nfoo bar baz"
+        with _PatchedDispatch(cfg["run"]["_fake_cli_argv_for_tests"]):
+            spawn.spawn_role(
+                role="planner", harness_config=cfg,
+                context_md=ctx, prompt="emit json",
+                workspace_root=self.td,
+                round_id="round-000042", variant_id="v-001",
+            )
+        scratch = self.td / "rounds" / "round-000042" / "scratch"
+        stdin_file = scratch / "planner.attempt1.stdin"
+        stdout_file = scratch / "planner.attempt1.stdout"
+        self.assertTrue(stdin_file.exists())
+        self.assertTrue(stdout_file.exists())
+        sent = stdin_file.read_text()
+        # The logged prompt is the full exchange: context followed by the prompt.
+        self.assertIn(ctx, sent)
+        self.assertIn("emit json", sent)
+
 
 class SpawnRoleRetryTest(unittest.TestCase):
     def setUp(self):

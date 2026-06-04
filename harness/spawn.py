@@ -300,7 +300,18 @@ def _append_diagnostic(existing_tail: str, diagnostic: str) -> str:
 
 
 def _write_attempt_files(scratch_dir: Path, role: str, attempt: str,
-                         result: _RunResult) -> None:
+                         result: _RunResult, stdin_text: str) -> None:
+    """Persist the full LLM exchange for one attempt to scratch (gitignored).
+
+    Writes three sibling files per attempt so a parse/validation failure can be
+    reproduced and diagnosed entirely from disk:
+      - {role}.{attempt}.stdin   the exact prompt sent (context + role/retry prompt)
+      - {role}.{attempt}.stdout  the raw bytes the CLI returned
+      - {role}.{attempt}.stderr  the captured stderr tail
+    """
+    (scratch_dir / f"{role}.{attempt}.stdin").write_text(
+        stdin_text, encoding="utf-8", errors="replace",
+    )
     (scratch_dir / f"{role}.{attempt}.stdout").write_bytes(result.stdout)
     (scratch_dir / f"{role}.{attempt}.stderr").write_text(
         result.stderr_tail, encoding="utf-8", errors="replace",
@@ -368,7 +379,7 @@ def spawn_role(
         cmd, stdin_text, spawn_timeout, silence_threshold,
         cwd=workspace_root,
     )
-    _write_attempt_files(scratch_dir, role, "attempt1", result1)
+    _write_attempt_files(scratch_dir, role, "attempt1", result1, stdin_text)
     if result1.verdict == "timeout":
         return RoleOutput(
             verdict="timeout", stderr_tail=result1.stderr_tail,
@@ -387,7 +398,7 @@ def spawn_role(
             cmd, stdin_text, spawn_timeout, silence_threshold,
             cwd=workspace_root,
         )
-        _write_attempt_files(scratch_dir, role, "attempt2", result2)
+        _write_attempt_files(scratch_dir, role, "attempt2", result2, stdin_text)
         retry_count = 1
         elapsed += result2.elapsed_seconds
         stderr_tail = result2.stderr_tail
@@ -433,7 +444,7 @@ def spawn_role(
         cmd, retry_stdin, spawn_timeout, silence_threshold,
         cwd=workspace_root,
     )
-    _write_attempt_files(scratch_dir, role, "retry", result3)
+    _write_attempt_files(scratch_dir, role, "retry", result3, retry_stdin)
     elapsed += result3.elapsed_seconds
     stderr_tail = result3.stderr_tail
     first_parse_diagnostic = f"first parse/validation error: {parse_error}"
