@@ -139,6 +139,16 @@ def cmd_run(
     for o in outcomes:
         print(f"{o.round_id} {o.variant_id} → {o.verdict}"
               f"{' (' + o.reason + ')' if o.reason else ''}")
+        # On rejection, surface the phase + detail inline so the cause is
+        # visible without digging into rejections/rj-*.md. reason is None only
+        # on the accept path; failed_phase/detail are populated on every reject.
+        if o.reason and (o.failed_phase or o.detail):
+            if o.failed_phase:
+                print(f"    phase: {o.failed_phase}"
+                      f"{' (' + o.rj_id + ')' if o.rj_id else ''}")
+            if o.detail:
+                for line in o.detail.splitlines() or [o.detail]:
+                    print(f"    {line}")
     print(f"Ran {len(outcomes)} round(s).")
     return 0
 

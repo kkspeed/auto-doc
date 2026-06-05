@@ -201,6 +201,161 @@ class RunRoundHappyPathTest(unittest.TestCase):
             self.assertTrue((scratch / f"{role}.json").exists(),
                             f"missing scratch for {role}")
 
+    def test_designer_short_claim_id_is_reassigned_and_round_merges(self):
+        # Regression: the designer (an LLM) emits a non-6-digit id 'cl-001'.
+        # The orchestrator must reassign it to cl-000001, not fail materialize
+        # with "malformed/unsafe claim id".
+        designer_output = _designer_ok(claims=[
+            {"id": "cl-001", "section_id": "retry-policy",
+             "decision_id": "retry-policy",
+             "claim_type": "decision",
+             "evidence_ids": [],
+             "assertion": "Use expo-backoff.",
+             "position": "expo-backoff"},
+        ])
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), designer_output, _reviewer_ok(), _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001",
+            )
+        self.assertEqual(outcome.verdict, "merge", outcome.detail)
+        cl_path = (self.ws / "variants" / "nodes" / "v-001" / "claims"
+                   / "cl-000001.json")
+        self.assertTrue(cl_path.exists(),
+                        "short id should be reassigned to cl-000001")
+        body = json.loads(cl_path.read_text())
+        self.assertEqual(body["id"], "cl-000001",
+                         "on-disk body id must match the reassigned filename")
+        # scratch designer.json must carry the reassigned id too
+        scratch = json.loads(
+            (self.ws / "rounds" / "round-000001" / "scratch"
+             / "designer.json").read_text())
+        self.assertEqual(scratch["claims"][0]["id"], "cl-000001",
+                         "scratch copy must agree with the on-disk id")
+
+
+class ClaimIdAllocationTest(unittest.TestCase):
+    """Unit tests for orchestrator-owned claim-id allocation."""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _seed_claim(self, variant_id, seq):
+        d = self.ws / "variants" / "nodes" / variant_id / "claims"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"cl-{seq:06d}.json").write_text("{}")
+
+    def test_overwrites_malformed_ids_sequentially_from_one(self):
+        parsed = {"claims": [
+            {"id": "cl-001"}, {"id": "garbage"}, {"id": "cl-7"},
+        ]}
+        orchestrator._assign_claim_ids(self.ws, parsed)
+        self.assertEqual([c["id"] for c in parsed["claims"]],
+                         ["cl-000001", "cl-000002", "cl-000003"])
+
+    def test_continues_past_global_max_across_variants(self):
+        # ids are a workspace-wide ledger: allocation continues past the max
+        # of ALL variants, not just the one being written.
+        self._seed_claim("v-001", 3)
+        self._seed_claim("v-002", 7)
+        parsed = {"claims": [{"id": "cl-001"}, {"id": "cl-002"}]}
+        orchestrator._assign_claim_ids(self.ws, parsed)
+        self.assertEqual([c["id"] for c in parsed["claims"]],
+                         ["cl-000008", "cl-000009"])
+
+    def test_noop_when_claims_missing_or_not_a_list(self):
+        for parsed in ({}, {"claims": None}, {"claims": "nope"}):
+            orchestrator._assign_claim_ids(self.ws, parsed)  # must not raise
+
+    def test_max_seq_ignores_non_matching_filenames(self):
+        self._seed_claim("v-001", 5)
+        d = self.ws / "variants" / "nodes" / "v-001" / "claims"
+        (d / "cl-bad.json").write_text("{}")
+        (d / "cl-1234567.json").write_text("{}")  # 7 digits, not a match
+        self.assertEqual(orchestrator._max_existing_claim_seq(self.ws), 5)
+
+
+class EvidenceIdAllocationTest(unittest.TestCase):
+    """Unit tests for orchestrator-owned evidence-id allocation + remap."""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _seed_evidence(self, seq):
+        d = self.ws / "evidence"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"ev-{seq:06d}.md").write_text("+++\n+++\n")
+
+    def test_reassigns_above_global_max_and_remaps_claim_refs(self):
+        self._seed_evidence(4)  # existing on disk → next is ev-000005
+        parsed = {
+            "patch_diff": "",
+            "evidence": [{"id": "ev-000001", "confidence": "high",
+                          "citations": [], "claim": "c", "excerpt": "e"}],
+            "claims": [{"id": "cl-000001", "evidence_ids": ["ev-000001"]}],
+        }
+        orchestrator._assign_evidence_ids(self.ws, parsed)
+        self.assertEqual(parsed["evidence"][0]["id"], "ev-000005")
+        self.assertEqual(parsed["claims"][0]["evidence_ids"], ["ev-000005"],
+                         "claim ref must follow the reassigned evidence id")
+
+    def test_remaps_doc_citations_in_patch_diff(self):
+        parsed = {
+            "patch_diff": "+++ b/doc/s.md\n+Body text.[^ev-000001] More.\n",
+            "evidence": [{"id": "ev-000001"}],
+            "claims": [],
+        }
+        orchestrator._assign_evidence_ids(self.ws, parsed)
+        # max=0 → first id is ev-000001, which equals the proposed id, so the
+        # citation is unchanged (no remap needed).
+        self.assertEqual(parsed["evidence"][0]["id"], "ev-000001")
+        self.assertIn("[^ev-000001]", parsed["patch_diff"])
+
+    def test_remaps_doc_citations_when_collision_forces_new_id(self):
+        self._seed_evidence(1)  # ev-000001 exists → proposed ev-000001 collides
+        parsed = {
+            "patch_diff": "+Body.[^ev-000001] and again [^ev-000001].\n",
+            "evidence": [{"id": "ev-000001"}],
+            "claims": [{"id": "cl-000001", "evidence_ids": ["ev-000001"]}],
+        }
+        orchestrator._assign_evidence_ids(self.ws, parsed)
+        self.assertEqual(parsed["evidence"][0]["id"], "ev-000002")
+        self.assertNotIn("[^ev-000001]", parsed["patch_diff"])
+        self.assertEqual(parsed["patch_diff"].count("[^ev-000002]"), 2)
+        self.assertEqual(parsed["claims"][0]["evidence_ids"], ["ev-000002"])
+
+    def test_swapped_ids_remap_correctly(self):
+        # Designer emits ids out of order; remap keyed by original id, so a swap
+        # resolves each ref to the right item. max=0 → assign 1,2 in order.
+        parsed = {
+            "patch_diff": "+a [^ev-000007] b [^ev-000006]\n",
+            "evidence": [{"id": "ev-000007"}, {"id": "ev-000006"}],
+            "claims": [
+                {"id": "cl-1", "evidence_ids": ["ev-000007"]},
+                {"id": "cl-2", "evidence_ids": ["ev-000006"]},
+            ],
+        }
+        orchestrator._assign_evidence_ids(self.ws, parsed)
+        # item #1 (orig ev-000007) → ev-000001; item #2 (orig ev-000006) → ev-000002
+        self.assertEqual([e["id"] for e in parsed["evidence"]],
+                         ["ev-000001", "ev-000002"])
+        self.assertEqual(parsed["claims"][0]["evidence_ids"], ["ev-000001"])
+        self.assertEqual(parsed["claims"][1]["evidence_ids"], ["ev-000002"])
+        self.assertEqual(parsed["patch_diff"], "+a [^ev-000001] b [^ev-000002]\n")
+
+    def test_noop_when_no_evidence(self):
+        for parsed in ({}, {"evidence": []}, {"evidence": None}):
+            orchestrator._assign_evidence_ids(self.ws, parsed)  # must not raise
+
 
 class RunRoundPlannerFailureTest(unittest.TestCase):
     def setUp(self):

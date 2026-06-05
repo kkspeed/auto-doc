@@ -60,6 +60,8 @@ class RoundOutcome:
     verdict: str
     reason: str | None = None
     rj_id: str | None = None
+    failed_phase: str | None = None
+    detail: str | None = None
     elapsed_seconds: float = 0.0
     spawn_counts: dict = field(default_factory=dict)
 
@@ -159,6 +161,18 @@ def _log(workspace_root: Path, event: str, **fields) -> None:
     round_ledger.append_actions_log(workspace_root, entry)
 
 
+# Rejection details can be long (excerpt diffs, multi-line stderr). The full
+# text always lives in rejections/rj-*.md; actions.jsonl keeps a bounded copy
+# so the cause is grep-able without opening the round's rejection file.
+_DETAIL_LOG_LIMIT = 800
+
+
+def _truncate_detail(detail: str) -> str:
+    if len(detail) <= _DETAIL_LOG_LIMIT:
+        return detail
+    return detail[:_DETAIL_LOG_LIMIT] + f"… [+{len(detail) - _DETAIL_LOG_LIMIT} chars]"
+
+
 def _current_head_sha(workspace_root: Path) -> str | None:
     try:
         return subprocess.check_output(
@@ -230,6 +244,124 @@ VERIFIER_C_PROMPT = (
     "disk)' in the CONTEXT above; do not rely on the summary tables alone. "
     "Output ONLY valid JSON."
 )
+
+
+_CLAIM_SEQ_RE = re.compile(r"^cl-(\d{6})$")
+
+
+def _max_existing_claim_seq(workspace_root: Path) -> int:
+    """Highest cl-NNNNNN sequence number across every variant's claims dir
+    (0 if none exist yet). Scanned globally — claim ids are an append-only,
+    workspace-wide ledger (attacks reference target_claim_id without a variant
+    qualifier), so ids must be unique across variants, not just within one."""
+    max_seq = 0
+    nodes = workspace_root / "variants" / "nodes"
+    if not nodes.exists():
+        return 0
+    for cl_path in nodes.glob("*/claims/cl-*.json"):
+        m = _CLAIM_SEQ_RE.match(cl_path.stem)
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
+    return max_seq
+
+
+def _assign_claim_ids(workspace_root: Path, parsed: dict) -> None:
+    """Reassign every designer claim a fresh, globally-unique, append-only
+    cl-NNNNNN id, mutating parsed['claims'] in place.
+
+    The designer is an LLM and cannot reliably mint zero-padded, collision-free
+    sequential ids — it emits e.g. 'cl-001', which fails the materialize id
+    regex, and even a well-formatted guess risks colliding with an existing
+    claim (append-only violation). The orchestrator owns this allocation so
+    claim materialize can never fail on id format or collision. Safe because a
+    claim's id is only its own filename + body field; claims are never
+    cross-referenced (the doc cites evidence, not claims), so overwriting the
+    designer's chosen id breaks nothing. Must run BEFORE the scratch write so
+    the scratch copy and the on-disk claim files share the assigned ids."""
+    claims = parsed.get("claims")
+    if not isinstance(claims, list):
+        return
+    next_seq = _max_existing_claim_seq(workspace_root) + 1
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        claim["id"] = f"cl-{next_seq:06d}"
+        next_seq += 1
+
+
+_EV_SEQ_RE = re.compile(r"^ev-(\d{6})$")
+_CITE_RE = re.compile(r"\[\^ev-(\d{6})\]")
+
+
+def _max_existing_evidence_seq(workspace_root: Path) -> int:
+    """Highest ev-NNNNNN sequence number in the (global, single) evidence dir
+    (0 if none exist yet). Evidence is a workspace-wide append-only ledger."""
+    max_seq = 0
+    ev_dir = workspace_root / "evidence"
+    if not ev_dir.exists():
+        return 0
+    for ev_path in ev_dir.glob("ev-*.md"):
+        m = _EV_SEQ_RE.match(ev_path.stem)
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
+    return max_seq
+
+
+def _assign_evidence_ids(workspace_root: Path, parsed: dict) -> None:
+    """Reassign each NEW evidence item a fresh, globally-unique ev-NNNNNN id
+    and remap every in-payload reference to it, mutating parsed in place.
+
+    Unlike claim ids, evidence id *format* is already enforced by
+    validate_designer_json, so the failure this prevents is COLLISION: the
+    designer (an LLM) proposing an id that already exists on disk, which trips
+    the append-only "already exists" guard at materialize. The orchestrator
+    allocates fresh ids above the global max so a collision is impossible.
+
+    Evidence IS cross-referenced, so after reassigning we remap:
+      - claim.evidence_ids — validate_designer_json guarantees every claim ref
+        is in THIS round's evidence set, so all refs are keys in the remap.
+      - [^ev-NNNNNN] citations inside patch_diff doc text.
+    evidence.citations is a {source, ref, lines, sha} list (not ev-id refs) and
+    is not materialized, so it is left untouched.
+
+    Must run BEFORE _assign_claim_ids and the scratch write so the remap reaches
+    the scratch copy and the on-disk files. Keyed by the designer's original id,
+    which validate_designer_json guarantees is unique within the payload, so
+    even a reordering/swap of ids remaps correctly.
+
+    Known limitation: if the designer both proposes a NEW evidence id that
+    happens to already exist on disk AND cites that same id in patch_diff
+    intending the pre-existing evidence, the citation is remapped to the fresh
+    item. This is contradictory designer intent (the old behaviour hard-failed
+    the round), so converting it to a consistent remap is strictly no worse."""
+    evidence = parsed.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return
+    next_seq = _max_existing_evidence_seq(workspace_root) + 1
+    remap: dict[str, str] = {}
+    for ev in evidence:
+        if not isinstance(ev, dict):
+            continue
+        old = ev.get("id")
+        new = f"ev-{next_seq:06d}"
+        next_seq += 1
+        ev["id"] = new
+        if isinstance(old, str) and old and old != new:
+            remap[old] = new
+    if not remap:
+        return
+    for claim in parsed.get("claims", []) or []:
+        if not isinstance(claim, dict):
+            continue
+        refs = claim.get("evidence_ids")
+        if isinstance(refs, list):
+            claim["evidence_ids"] = [remap.get(r, r) for r in refs]
+    patch = parsed.get("patch_diff")
+    if isinstance(patch, str) and patch:
+        def _sub(m: "re.Match") -> str:
+            ev_id = f"ev-{m.group(1)}"
+            return f"[^{remap[ev_id]}]" if ev_id in remap else m.group(0)
+        parsed["patch_diff"] = _CITE_RE.sub(_sub, patch)
 
 
 def _materialize_designer_output(
@@ -438,7 +570,8 @@ def run_round(
         )
         _log(workspace_root, "rejection",
              round_id=round_id, rj_id=rj_id,
-             reason_class=reason_class, failed_phase=failed_phase)
+             reason_class=reason_class, failed_phase=failed_phase,
+             detail=_truncate_detail(detail))
         # Emit the commit/round_end log lines BEFORE commit_rejection so they
         # are staged into the same commit (which includes actions.jsonl),
         # leaving the worktree clean for the next round's start guard.
@@ -453,6 +586,7 @@ def run_round(
         return RoundOutcome(
             round_id=round_id, variant_id=variant_id,
             verdict=action, reason=reason_class, rj_id=rj_id,
+            failed_phase=failed_phase, detail=detail,
             elapsed_seconds=time.monotonic() - start_ts,
             spawn_counts=spawn_counts,
         )
@@ -487,7 +621,8 @@ def run_round(
             reason_class="hook-rejected", failed_phase="commit",
             detail=detail)
         _log(workspace_root, "rejection", round_id=round_id, rj_id=rj_id,
-             reason_class="hook-rejected", failed_phase="commit")
+             reason_class="hook-rejected", failed_phase="commit",
+             detail=_truncate_detail(detail))
         # Emit the commit/round_end log lines BEFORE commit_rejection so they
         # are captured by the same commit (which stages actions.jsonl); this
         # leaves the worktree clean for the next round's assert_clean_worktree.
@@ -501,6 +636,7 @@ def run_round(
         return RoundOutcome(
             round_id=round_id, variant_id=variant_id,
             verdict="hook-rejected", reason="hook-rejected", rj_id=rj_id,
+            failed_phase="commit", detail=detail,
             elapsed_seconds=time.monotonic() - start_ts,
             spawn_counts=spawn_counts)
 
@@ -551,9 +687,6 @@ def run_round(
             failed_phase="designer",
             detail=f"designer: {designer_result.stderr_tail or designer_result.verdict}",
         )
-    round_ledger.write_role_scratch(
-        workspace_root, round_id, "designer", designer_result.parsed,
-    )
     _log(workspace_root, "spawn_complete",
          round_id=round_id, role="designer",
          verdict=designer_result.verdict,
@@ -569,6 +702,15 @@ def run_round(
                     f"round={dparsed.get('round')!r} variant="
                     f"{dparsed.get('variant')!r}, expected "
                     f"round={round_id!r} variant={variant_id!r}"))
+    # The orchestrator owns ledger id allocation: the designer (an LLM) cannot
+    # mint collision-free, append-only ids. Evidence first (it remaps
+    # claim.evidence_ids + doc citations), then claim ids. Both mutate dparsed
+    # in place BEFORE the scratch write so scratch + on-disk files agree.
+    _assign_evidence_ids(workspace_root, dparsed)
+    _assign_claim_ids(workspace_root, dparsed)
+    round_ledger.write_role_scratch(
+        workspace_root, round_id, "designer", dparsed,
+    )
     try:
         materialized, section_paths, claim_paths, _att_unused, evidence_paths = \
             _materialize_designer_output(
