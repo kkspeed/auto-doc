@@ -14,6 +14,7 @@ from unittest import mock
 
 from harness import orchestrator
 from harness import scorecard as scorecard_mod
+from harness.spawn import RoleOutput
 from tests.test_orchestrator_round import (
     _scaffold_workspace,
     _harness_config,
@@ -22,6 +23,12 @@ from tests.test_orchestrator_round import (
     _reviewer_ok,
     _verifier_c_ok,
 )
+
+
+def _seed_judge_ok(**dims):
+    parsed = {d: 0.3 for d in scorecard_mod.DIMENSIONS}
+    parsed.update(dims)
+    return RoleOutput(verdict="ok", parsed=parsed, elapsed_seconds=0.1)
 
 
 def _seed_baseline(ws: Path, dims: dict):
@@ -202,6 +209,83 @@ class ScoreGateTest(unittest.TestCase):
         self.assertEqual(sc["dimensions"]["goal_alignment"], 0.2)
         self.assertIn("goal_alignment", sc["delta"])
         self.assertEqual(sc["tolerance"], 0.05)
+
+
+class SeedScoringTest(unittest.TestCase):
+    """Round-0 seed quality eval (score_seed_docs)."""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        self.seeded = ["variants/nodes/v-001/doc/00-overview.md"]
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_writes_baseline_scorecard_from_judge(self):
+        judged = dict(groundedness=0.2, goal_alignment=0.35,
+                      technical_correctness=0.4, completeness=0.15,
+                      coherence=0.5, constitution_compliance=0.6)
+        with mock.patch("harness.orchestrator.spawn_role",
+                        return_value=_seed_judge_ok(**judged)):
+            written = orchestrator.score_seed_docs(
+                self.ws, _harness_config(), self.seeded)
+        self.assertEqual(written, ["variants/nodes/v-001/scorecard.json"])
+        sc = json.loads(
+            (self.ws / "variants" / "nodes" / "v-001"
+             / "scorecard.json").read_text())
+        self.assertEqual(sc["round"], "round-000000")
+        # No dimension defaults to 1.0 — every value comes from the judge.
+        self.assertEqual(sc["dimensions"], judged)
+        self.assertTrue(all(v < 1.0 for v in sc["dimensions"].values()))
+
+    def test_becomes_round1_prior_so_round1_is_gated_not_bootstrap(self):
+        # A seed baseline must make round 1 a *gated* round: a round that
+        # improves nothing over the seed is rejected (not auto-merged as
+        # bootstrap would be).
+        high = {d: 0.95 for d in scorecard_mod.DIMENSIONS}
+        with mock.patch("harness.orchestrator.spawn_role",
+                        return_value=_seed_judge_ok(**high)):
+            orchestrator.score_seed_docs(
+                self.ws, _harness_config(), self.seeded)
+        prior = scorecard_mod.load_scorecard(
+            self.ws / "variants" / "nodes" / "v-001" / "scorecard.json")
+        self.assertIsNotNone(prior)
+        passed, _ = scorecard_mod.evaluate_gate(
+            prior["dimensions"], dict(high), 0.05)
+        self.assertFalse(passed, "round matching the seed must not auto-pass")
+
+    def test_falls_back_to_reviewer_model_when_seed_judge_unconfigured(self):
+        # _harness_config() has no [models.seed_judge]; score_seed_docs must
+        # reuse the reviewer model rather than KeyError out of the run.
+        captured = {}
+
+        def fake_spawn(*, role, harness_config, **kw):
+            captured["role"] = role
+            captured["model"] = harness_config["models"][role]
+            return _seed_judge_ok()
+
+        with mock.patch("harness.orchestrator.spawn_role",
+                        side_effect=fake_spawn):
+            written = orchestrator.score_seed_docs(
+                self.ws, _harness_config(), self.seeded)
+        self.assertEqual(written, ["variants/nodes/v-001/scorecard.json"])
+        self.assertEqual(captured["role"], "seed_judge")
+        self.assertEqual(captured["model"],
+                         _harness_config()["models"]["reviewer"])
+
+    def test_skips_gracefully_on_judge_failure(self):
+        # A flaky judge must not block the run: no scorecard, round 1 bootstraps.
+        with mock.patch("harness.orchestrator.spawn_role",
+                        return_value=RoleOutput(verdict="spawn-failed",
+                                                stderr_tail="boom")):
+            written = orchestrator.score_seed_docs(
+                self.ws, _harness_config(), self.seeded)
+        self.assertEqual(written, [])
+        self.assertFalse(
+            (self.ws / "variants" / "nodes" / "v-001"
+             / "scorecard.json").exists())
 
 
 if __name__ == "__main__":

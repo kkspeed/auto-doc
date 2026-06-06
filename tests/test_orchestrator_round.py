@@ -15,6 +15,7 @@ from unittest import mock
 
 from harness import orchestrator
 from harness import round_ledger
+from harness import scorecard as scorecard_mod
 from harness.spawn import RoleOutput
 
 
@@ -1016,6 +1017,33 @@ class ReviewerScoreFieldsValidatorTest(unittest.TestCase):
         d = dict(self.BASE, goal_alignment="high")
         with self.assertRaises(ValueError):
             orchestrator.validate_reviewer_json(d)
+
+    def test_optional_judged_dims_pass_when_valid(self):
+        d = dict(self.BASE, groundedness=0.6, completeness=0.3, coherence=0.9)
+        orchestrator.validate_reviewer_json(d)  # no raise
+
+    def test_optional_judged_dim_out_of_range_raises(self):
+        d = dict(self.BASE, completeness=1.5)
+        with self.assertRaises(ValueError):
+            orchestrator.validate_reviewer_json(d)
+
+
+class SeedJudgeValidatorTest(unittest.TestCase):
+    BASE = {d: 0.5 for d in scorecard_mod.DIMENSIONS}
+
+    def test_all_dimensions_present_passes(self):
+        orchestrator.validate_seed_judge_json(dict(self.BASE))  # no raise
+
+    def test_missing_dimension_raises(self):
+        d = dict(self.BASE)
+        del d["coherence"]
+        with self.assertRaises(ValueError):
+            orchestrator.validate_seed_judge_json(d)
+
+    def test_out_of_range_raises(self):
+        d = dict(self.BASE, groundedness=1.2)
+        with self.assertRaises(ValueError):
+            orchestrator.validate_seed_judge_json(d)
 
 
 class PromptReadInstructionTest(unittest.TestCase):

@@ -14,6 +14,25 @@ from harness.spawn import RoleOutput
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+# These tests mock run_round, so the only real spawn_role caller left in
+# run_loop is the round-0 seed scorer. No-op it module-wide: round 1 then
+# bootstraps, which is what every assertion here assumes. Seed scoring has its
+# own dedicated coverage in test_orchestrator_score_gate.py.
+_seed_patcher = None
+
+
+def setUpModule():
+    global _seed_patcher
+    _seed_patcher = mock.patch(
+        "harness.orchestrator.score_seed_docs", return_value=[])
+    _seed_patcher.start()
+
+
+def tearDownModule():
+    if _seed_patcher is not None:
+        _seed_patcher.stop()
+
+
 def _scaffold_workspace(target: Path):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT) + ":" + env.get("PYTHONPATH", "")

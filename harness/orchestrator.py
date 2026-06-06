@@ -160,6 +160,21 @@ def validate_verifier_c_json(d: dict) -> None:
         )
 
 
+def validate_seed_judge_json(d: dict) -> None:
+    """The seed judge scores the seed doc on every scorecard dimension so the
+    round-0 baseline reflects the doc's real quality rather than the mechanical
+    'empty input -> 1.0' defaults. Every dimension is REQUIRED (no fallback):
+    the whole point is that no metric is assumed perfect."""
+    for key in scorecard_mod.DIMENSIONS:
+        if key not in d:
+            raise ValueError(f"seed_judge.json missing dimension {key!r}")
+        v = d[key]
+        if not isinstance(v, (int, float)) or not (0.0 <= v <= 1.0):
+            raise ValueError(
+                f"seed_judge.json {key} must be a float in [0,1], got {v!r}"
+            )
+
+
 # ----- Helpers --------------------------------------------------------------
 
 
@@ -291,6 +306,23 @@ VERIFIER_C_PROMPT = (
     "Before answering, read every path listed under 'Read these first (on "
     "disk)' in the CONTEXT above; do not rely on the summary tables alone. "
     "Output ONLY valid JSON."
+)
+
+SEED_JUDGE_PROMPT = (
+    "You are the seed judge. This is round 0: score the EXISTING seed document "
+    "as-is to establish the quality baseline that all later rounds must "
+    "improve on. Read the seed doc, the goal, and the constitution listed "
+    "under 'Read these first (on disk)'. Emit JSON with exactly these float "
+    "fields, each in [0,1], judged from what the seed doc actually contains: "
+    "groundedness (how well its assertions are supported), goal_alignment (how "
+    "well it serves the stated goal), technical_correctness (how technically "
+    "sound its content is), completeness (how fully it covers the open/proposed "
+    "decisions), coherence (how clearly and consistently it reads), "
+    "constitution_compliance (how well it honors the constitution). "
+    "Score what is actually there: an empty or stub seed should score LOW "
+    "across the board, a thorough drafted seed higher. Do NOT assume any "
+    "dimension is 1.0 — reserve 1.0 for a genuinely complete, polished doc and "
+    "0.0 for absent. Output ONLY valid JSON."
 )
 
 
@@ -1207,6 +1239,69 @@ def run_round(
     )
 
 
+_SEEDED_VARIANT_RE = re.compile(r"^variants/nodes/(v-\d{3})/doc/")
+
+
+def score_seed_docs(
+    workspace_root: Path,
+    harness_config: dict,
+    seeded_paths: list[str],
+) -> list[str]:
+    """Round-0 quality eval: judge each freshly-seeded variant doc and write a
+    baseline scorecard.json so round 1+ is gated against the seed's real
+    quality instead of bootstrapping into the mechanical 'empty -> 1.0'
+    defaults (which made every later round a regression).
+
+    Returns the list of scorecard.json rel-paths written (for git add). Degrades
+    gracefully: a variant whose judge spawn fails or returns a non-ok verdict
+    is skipped (logged), leaving it to bootstrap on round 1 — a flaky judge must
+    not block the whole overnight run."""
+    # seed_judge is a recent role; an older workspace's harness.toml may not
+    # configure it. Fall back to the reviewer's model (closest analogue — a
+    # quality judgment) so seed scoring still runs. If even reviewer is absent,
+    # skip entirely rather than KeyError out of the whole run.
+    models = harness_config.get("models", {})
+    if "seed_judge" not in models:
+        if "reviewer" not in models:
+            _log(workspace_root, "seed_score_skip",
+                 detail="no seed_judge or reviewer model configured")
+            return []
+        harness_config = {**harness_config,
+                          "models": {**models,
+                                     "seed_judge": models["reviewer"]}}
+    variant_ids: list[str] = []
+    for rel in seeded_paths:
+        m = _SEEDED_VARIANT_RE.match(rel)
+        if m and m.group(1) not in variant_ids:
+            variant_ids.append(m.group(1))
+    written: list[str] = []
+    for variant_id in variant_ids:
+        ctx = context_mod.build_seed_judge_context(workspace_root, variant_id)
+        result = spawn_role(
+            role="seed_judge", harness_config=harness_config,
+            context_md=ctx, prompt=SEED_JUDGE_PROMPT,
+            workspace_root=workspace_root, round_id="round-000000",
+            variant_id=variant_id,
+            validator=validate_seed_judge_json,
+        )
+        if result.verdict != "ok":
+            _log(workspace_root, "seed_score_skip",
+                 variant_id=variant_id, verdict=result.verdict,
+                 detail=result.stderr_tail or result.verdict)
+            continue
+        dims = {d: float(result.parsed[d]) for d in scorecard_mod.DIMENSIONS}
+        sc_path = (workspace_root / "variants" / "nodes" / variant_id
+                   / "scorecard.json")
+        scorecard_mod.write_scorecard(
+            sc_path,
+            scorecard_mod.build_scorecard(variant_id, "round-000000", dims),
+        )
+        written.append(f"variants/nodes/{variant_id}/scorecard.json")
+        _log(workspace_root, "seed_score",
+             variant_id=variant_id, dimensions=dims)
+    return written
+
+
 _ROUND_DIR_RE = re.compile(r"^round-(\d{6})$")
 
 
@@ -1253,8 +1348,19 @@ def run_loop(
     # all on a worktree we've asserted is clean.
     seeded = bootstrap.seed_variant_docs(workspace_root, variant_count)
     if seeded:
+        # Score each seed doc (round 0) so round 1+ is gated against the seed's
+        # real quality, not the mechanical 'empty -> 1.0' baseline. Commit the
+        # baseline scorecards together with the seed docs as a single init.
+        seed_scorecards = score_seed_docs(
+            workspace_root, harness_config, seeded)
+        # score_seed_docs appends seed_score/seed_score_skip lines to
+        # actions.jsonl; stage it in the same init commit so the worktree is
+        # clean before round 1's assert_clean_worktree.
+        to_stage = list(seeded) + seed_scorecards
+        if (workspace_root / "actions.jsonl").exists():
+            to_stage.append("actions.jsonl")
         try:
-            round_ledger._git_add(workspace_root, *seeded)
+            round_ledger._git_add(workspace_root, *to_stage)
             round_ledger._git_commit(
                 workspace_root,
                 "harness: seed variant documents\n\nAction: init\n")

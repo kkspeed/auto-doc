@@ -213,6 +213,19 @@ class ComputeDimensionsTest(unittest.TestCase):
         dims = self._dims(reviewer_groundedness=0.9)
         self.assertEqual(dims["groundedness"], 0.0)
 
+    def test_completeness_is_pure_llm_not_capped_by_section_proxy(self):
+        # An open decision with no matching doc section -> mechanical
+        # completeness 0.0. Completeness must NOT be capped to 0.0 (the
+        # section_id proxy is too coarse); the reviewer's score flows through.
+        dims = self._dims(
+            decisions=[{"id": "retry-policy", "status": "open"}],
+            reviewer_completeness=0.55)
+        self.assertAlmostEqual(dims["completeness"], 0.55)
+
+    def test_completeness_falls_back_to_mechanical_when_omitted(self):
+        dims = self._dims(decisions=[{"id": "retry-policy", "status": "open"}])
+        self.assertEqual(dims["completeness"], 0.0)  # mechanical fallback
+
 
 class GateTest(unittest.TestCase):
     BASE = {d: 0.5 for d in scorecard.DIMENSIONS}

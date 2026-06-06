@@ -166,6 +166,18 @@ def _cap(llm_score: float | None, mechanical: float) -> float:
     return min(llm_score, mechanical)
 
 
+def _judged(llm_score: float | None, mechanical_fallback: float) -> float:
+    """Pure LLM-judged dimension: use the reviewer's continuous score directly;
+    fall back to the mechanical proxy ONLY when the reviewer omitted it.
+
+    Unlike _cap, the mechanical value is not a ceiling. Used for completeness,
+    whose mechanical proxy ("a doc section's section_id literally equals the
+    decision id") is too coarse to cap a genuine judgment — decisions are
+    routinely covered in prose or shared sections, so the proxy reads 0.0 for a
+    substantively complete doc and would pin the score to 0 on early rounds."""
+    return mechanical_fallback if llm_score is None else llm_score
+
+
 def compute_dimensions(
     *,
     variant_claims_dir: Path,
@@ -193,7 +205,7 @@ def compute_dimensions(
         "goal_alignment": reviewer_goal_alignment,
         "technical_correctness": compute_technical_correctness(
             reviewer_technical_correctness, vc_rate),
-        "completeness": _cap(
+        "completeness": _judged(
             reviewer_completeness,
             compute_completeness(decisions, variant_doc_dir)),
         "coherence": _cap(

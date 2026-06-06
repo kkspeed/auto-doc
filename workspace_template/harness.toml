@@ -24,6 +24,14 @@ model = "claude-opus-4-7-20260315"
 tool  = "codex"
 model = "gpt-5-20260301"
 
+[models.seed_judge]
+# One-time round-0 quality eval of the seed doc — establishes the baseline
+# scorecard that every later round must improve on. A strong judgment model is
+# worth it since this baseline gates the whole run. Omit this section and the
+# harness falls back to the reviewer model.
+tool  = "claude"
+model = "claude-opus-4-7-20260315"
+
 
 [run]
 # Loop bounds: whichever hits first ends the run.

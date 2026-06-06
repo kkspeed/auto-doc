@@ -441,3 +441,22 @@ def build_verifier_c_context(workspace_root: Path, round_id: str,
         ]))
     out.append(_render_registered_decisions(decisions))
     return "\n".join(out)
+
+
+# ----- Seed judge -------------------------------------------------------------
+
+
+def build_seed_judge_context(workspace_root: Path, variant_id: str) -> str:
+    """Context for the round-0 seed quality eval: the variant's seeded doc, the
+    goal, and the constitution. No claims/evidence exist yet."""
+    decisions = _load_decisions(workspace_root)
+    goal_version = _load_goal_version(workspace_root)
+    title, description = _load_goal_meta(workspace_root)
+    out = [_header("seed_judge", "round-000000", variant_id, goal_version), ""]
+    out.append(_render_goal_and_pointers(
+        title, description, [
+            f"variants/nodes/{variant_id}/doc/",
+            "constitution.md",
+        ]))
+    out.append(_render_registered_decisions(decisions))
+    return "\n".join(out)
