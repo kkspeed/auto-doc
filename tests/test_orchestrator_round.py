@@ -91,13 +91,19 @@ def _designer_ok(round_id="round-000001", variant="v-001",
 def _reviewer_ok(round_id="round-000001", variant="v-001",
                  decision="accept", decision_proposals=None, attacks=None,
                  rejection=None, goal_alignment=0.8,
-                 technical_correctness=0.7):
+                 technical_correctness=0.7, groundedness=None,
+                 completeness=None, coherence=None):
     parsed = {
         "round": round_id, "variant": variant,
         "decision": decision, "rationale": "looks fine",
         "goal_alignment": goal_alignment,
         "technical_correctness": technical_correctness,
     }
+    for key, val in (("groundedness", groundedness),
+                     ("completeness", completeness),
+                     ("coherence", coherence)):
+        if val is not None:
+            parsed[key] = val
     if decision_proposals is not None:
         parsed["decision_proposals"] = decision_proposals
     if attacks is not None:

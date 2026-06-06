@@ -135,6 +135,73 @@ class ScoreGateTest(unittest.TestCase):
                    / "cl-000001.json")
         self.assertFalse(cl_path.exists(),
                          "materialized claim should be discarded on gate fail")
+        # Traceability: outcome.detail spells out the per-dimension before->after,
+        # the reviewer scores, and points at the preserved designer output.
+        self.assertIsNotNone(outcome.detail)
+        self.assertIn("goal_alignment: 0.90 -> 0.20", outcome.detail)
+        self.assertIn("reviewer scores", outcome.detail)
+        self.assertIn("full delta", outcome.detail)
+        self.assertIn("rounds/round-000001/scratch/designer.json",
+                      outcome.detail)
+        self.assertIn("rounds/round-000001/patch.diff", outcome.detail)
+        # The preserved (gitignored) artifacts actually survive the rollback.
+        self.assertTrue(
+            (self.ws / "rounds" / "round-000001" / "scratch"
+             / "reviewer.json").exists(),
+            "reviewer scratch must survive rejection for post-mortem")
+        # The rejection record on disk carries the same enriched detail.
+        rj = (self.ws / "rejections" / f"{outcome.rj_id}.md").read_text()
+        self.assertIn("goal_alignment: 0.90 -> 0.20", rj)
+
+    def test_reviewer_judged_scores_flow_into_scorecard(self):
+        # A mechanically-clean round: the reviewer's continuous groundedness/
+        # completeness/coherence judgments must land in scorecard.json instead
+        # of snapping to the mechanical 1.0/0.0.
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(),
+            _designer_ok(claims=self._claims()),
+            _reviewer_ok(goal_alignment=0.8, technical_correctness=0.7,
+                         groundedness=0.64, completeness=0.0, coherence=0.72),
+            _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "merge", outcome.detail)
+        sc = json.loads(
+            (self.ws / "variants" / "nodes" / "v-001"
+             / "scorecard.json").read_text())
+        dims = sc["dimensions"]
+        # claim has empty evidence_ids -> mechanically grounded (1.0), so the
+        # reviewer's 0.64 caps through; coherence has no cites -> 1.0 cap, 0.72
+        # through. completeness is mechanically 0.0 (no doc section), capping
+        # the reviewer's 0.0 to 0.0 either way.
+        self.assertAlmostEqual(dims["groundedness"], 0.64)
+        self.assertAlmostEqual(dims["coherence"], 0.72)
+
+    def test_scorecard_log_records_prior_and_delta(self):
+        high = {d: 0.9 for d in scorecard_mod.DIMENSIONS}
+        high["completeness"] = 0.0
+        _seed_baseline(self.ws, high)
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(),
+            _designer_ok(claims=self._claims()),
+            _reviewer_ok(goal_alignment=0.2, technical_correctness=0.2),
+            _verifier_c_ok(),
+        ]):
+            orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        actions = [
+            json.loads(ln) for ln in
+            (self.ws / "actions.jsonl").read_text().splitlines() if ln.strip()
+        ]
+        sc = next(a for a in actions if a.get("event") == "scorecard")
+        self.assertFalse(sc["passed"])
+        self.assertIsNotNone(sc["prior_dimensions"],
+                             "scorecard log must record prior dims for the delta")
+        self.assertEqual(sc["prior_dimensions"]["goal_alignment"], 0.9)
+        self.assertEqual(sc["dimensions"]["goal_alignment"], 0.2)
+        self.assertIn("goal_alignment", sc["delta"])
+        self.assertEqual(sc["tolerance"], 0.05)
 
 
 if __name__ == "__main__":

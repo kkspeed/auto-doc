@@ -427,7 +427,9 @@ Loaded into every CONTEXT.md. Re-injected mid-session every N turns for long age
 
 Merge rule: improve ≥1 dim, regress 0 below threshold.
 
-Dimensions: groundedness (% claims verified A+B), goal_alignment (Reviewer judgment), technical_correctness (Reviewer + Verifier C), completeness (% required sections), coherence (contradictions, dead refs), constitution_compliance (hook violations).
+Dimensions: groundedness, goal_alignment, technical_correctness, completeness, coherence, constitution_compliance.
+
+Scoring model: goal_alignment and technical_correctness are Reviewer judgments (the latter scaled by Verifier C confirm-rate). groundedness, completeness, and coherence are Reviewer-judged on a continuous [0,1] scale, each **capped** by its mechanical check (`min(llm, mechanical)`): an objectively clean dimension lets the continuous judgment through, while an objective defect (ungrounded claim, missing required section, dead/superseded citation) caps the score. When the Reviewer omits a judged score it falls back to the mechanical value. constitution_compliance stays a pure mechanical policy count (1 − denied/total). The cap exists because the bare count-fractions snap to 0.0/1.0 on the small inputs of early rounds, which made the merge gate reject legitimate progress.
 
 Per-variant `scorecard.json` updated on merge. Trajectory in commit trailers, derivable via `git log`.
 

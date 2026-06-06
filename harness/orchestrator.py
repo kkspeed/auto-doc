@@ -130,6 +130,19 @@ def validate_reviewer_json(d: dict) -> None:
             raise ValueError(
                 f"reviewer.json {key} must be a float in [0,1], got {v!r}"
             )
+    # LLM-judged quality dimensions. Optional for backward/forward
+    # compatibility: when present they refine the mechanical score (see
+    # scorecard._cap); when absent the scorecard falls back to the mechanical
+    # value, so a flaky omission degrades gracefully instead of hard-failing
+    # an overnight round. Validated only when supplied.
+    for key in ("groundedness", "completeness", "coherence"):
+        if key not in d:
+            continue
+        v = d[key]
+        if not isinstance(v, (int, float)) or not (0.0 <= v <= 1.0):
+            raise ValueError(
+                f"reviewer.json {key} must be a float in [0,1], got {v!r}"
+            )
     # decision_proposals and attacks roundtrip via their dataclass from_dict
     for v in d.get("decision_proposals", []) or []:
         cg.DecisionProposalVerdict.from_dict(v)
@@ -163,8 +176,10 @@ def _log(workspace_root: Path, event: str, **fields) -> None:
 
 # Rejection details can be long (excerpt diffs, multi-line stderr). The full
 # text always lives in rejections/rj-*.md; actions.jsonl keeps a bounded copy
-# so the cause is grep-able without opening the round's rejection file.
-_DETAIL_LOG_LIMIT = 800
+# so the cause is grep-able without opening the round's rejection file. The
+# cap is generous enough to hold a full score-regression breakdown plus the
+# preserved-artifact pointer (the most useful hint, which trails the detail).
+_DETAIL_LOG_LIMIT = 2000
 
 
 def _truncate_detail(detail: str) -> str:
@@ -181,6 +196,32 @@ def _current_head_sha(workspace_root: Path) -> str | None:
         ).decode().strip()
     except subprocess.CalledProcessError:
         return None
+
+
+def _preserved_artifact_pointer(workspace_root: Path, round_id: str) -> str:
+    """Pointer to the round's preserved (gitignored) debug artifacts.
+
+    On rejection, _reject discards the materialized doc/claim/evidence files,
+    so a post-mortem `git diff` shows nothing. But the designer's exact output
+    survives on disk because rounds/*/patch.diff and rounds/*/scratch/ are
+    gitignored (and _discard_materialized never lists them): patch.diff is the
+    literal doc mutation that was applied-then-rolled-back, and the scratch
+    JSONs hold the raw role outputs (reviewer scores + rationale, VC verdicts).
+    Returns a "see also" block naming the ones that exist, or "" if none do."""
+    round_dir = workspace_root / "rounds" / round_id
+    candidates = [
+        round_dir / "patch.diff",
+        round_dir / "scratch" / "designer.json",
+        round_dir / "scratch" / "reviewer.json",
+        round_dir / "scratch" / "verifier_c.json",
+    ]
+    present = [p for p in candidates if p.exists()]
+    if not present:
+        return ""
+    lines = "\n".join(
+        f"  - {p.relative_to(workspace_root)}" for p in present)
+    return ("\n\nThe applied diff was rolled back on rejection. The designer's "
+            "raw output survives on disk (gitignored) for inspection:\n" + lines)
 
 
 def _read_round_actions(workspace_root: Path, round_id: str) -> list[dict]:
@@ -226,9 +267,16 @@ REVIEWER_PROMPT = (
     "(list of {proposed_id, verdict (approve|reject), rationale}) when the "
     "designer proposed new decisions, optional attacks (list of at-*.json "
     "dicts). "
-    "Also emit goal_alignment (float in [0,1]) scoring how well this round's "
-    "doc serves the stated goal, and technical_correctness (float in [0,1]) "
-    "scoring how technically correct the cited claims are. "
+    "Also emit five quality scores, each a float in [0,1], judged from the "
+    "doc + claims + cited evidence you read: "
+    "goal_alignment (how well this round's doc serves the stated goal); "
+    "technical_correctness (how technically correct the cited claims are); "
+    "groundedness (how well each claim is actually supported by its cited "
+    "evidence — not merely that the cite resolves); "
+    "completeness (how fully the doc covers the open/proposed decisions); "
+    "coherence (how clearly and consistently the doc reads as a whole). "
+    "Use the full continuous range — reserve 0.0 and 1.0 for genuine extremes, "
+    "not as defaults. "
     "Before answering, read every path listed under 'Read these first (on "
     "disk)' in the CONTEXT above; do not rely on the summary tables alone. "
     "Output ONLY valid JSON."
@@ -556,6 +604,10 @@ def run_round(
 
     def _reject(action: str, reason_class: str, failed_phase: str,
                 detail: str, reviewer_id: str | None = None) -> RoundOutcome:
+        # Append a pointer to the preserved (gitignored) designer output so the
+        # rejection is debuggable even though the applied diff is rolled back
+        # below. No-op before the designer phase (no scratch/patch.diff yet).
+        detail = detail + _preserved_artifact_pointer(workspace_root, round_id)
         _discard_materialized(workspace_root, materialized)
         # Map verdicts that aren't in the commit-msg hook's ALLOWED_ACTIONS
         # to their natural sibling. "timeout" comes from spawn_role's
@@ -973,6 +1025,9 @@ def run_round(
         reviewer_technical_correctness=reviewer_result.parsed[
             "technical_correctness"],
         vc_per_claim=vc_parsed.get("per_claim", []),
+        reviewer_groundedness=reviewer_result.parsed.get("groundedness"),
+        reviewer_completeness=reviewer_result.parsed.get("completeness"),
+        reviewer_coherence=reviewer_result.parsed.get("coherence"),
     )
     sc_path = variants_root / variant_id / "scorecard.json"
     sc_rel = f"variants/nodes/{variant_id}/scorecard.json"
@@ -982,15 +1037,38 @@ def run_round(
         "regression_tolerance", 0.05)
     passed, gate_detail = scorecard_mod.evaluate_gate(
         prior_dims, new_dimensions, tolerance)
+    full_delta = (
+        None if prior_dims is None
+        else scorecard_mod.format_score_delta(prior_dims, new_dimensions)
+    )
     _log(workspace_root, "scorecard", round_id=round_id,
          variant_id=variant_id, passed=passed, detail=gate_detail,
-         dimensions=new_dimensions)
+         dimensions=new_dimensions, prior_dimensions=prior_dims,
+         tolerance=tolerance, delta=full_delta)
     if not passed:
+        # Spell out the full before->after for every dimension (not just the
+        # regressed ones) plus the reviewer-supplied scores, so the cause of a
+        # gate failure is visible without re-running. _reject appends a pointer
+        # to the preserved designer diff/scratch on top of this.
+        dim_lines = "\n".join(
+            f"  {d}: {(prior_dims or {}).get(d, 0.0):.2f} -> "
+            f"{new_dimensions[d]:.2f}"
+            for d in scorecard_mod.DIMENSIONS
+        )
+        detail = (
+            f"scorecard gate failed: {gate_detail} (tolerance={tolerance})\n"
+            f"dimensions (prior -> new):\n{dim_lines}\n"
+            f"full delta: {full_delta if full_delta is not None else 'n/a'}\n"
+            f"reviewer scores: goal_alignment="
+            f"{reviewer_result.parsed['goal_alignment']}, "
+            f"technical_correctness="
+            f"{reviewer_result.parsed['technical_correctness']}"
+        )
         return _reject(
             action="score-regression",
             reason_class="score-regression",
             failed_phase="scorecard",
-            detail=f"scorecard gate failed ({gate_detail})",
+            detail=detail,
         )
     scorecard_mod.write_scorecard(
         sc_path,

@@ -146,6 +146,74 @@ class TechnicalCorrectnessTest(unittest.TestCase):
             scorecard.compute_vc_confirm_rate(per_claim), 2 / 3)
 
 
+class CapTest(unittest.TestCase):
+    """LLM-judged score capped by its mechanical sanity check."""
+
+    def test_none_llm_falls_back_to_mechanical(self):
+        self.assertEqual(scorecard._cap(None, 0.0), 0.0)
+        self.assertEqual(scorecard._cap(None, 1.0), 1.0)
+
+    def test_clean_mechanical_lets_continuous_llm_through(self):
+        # mechanical==1.0 (no objective defect) -> the LLM's continuous score
+        # flows through instead of snapping to 1.0.
+        self.assertAlmostEqual(scorecard._cap(0.63, 1.0), 0.63)
+
+    def test_objective_defect_caps_generous_llm(self):
+        # half the claims ungrounded -> a generous LLM can't exceed 0.5.
+        self.assertAlmostEqual(scorecard._cap(0.9, 0.5), 0.5)
+
+    def test_llm_can_be_stricter_than_clean_mechanical(self):
+        self.assertAlmostEqual(scorecard._cap(0.2, 1.0), 0.2)
+
+
+class ComputeDimensionsTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ev = self.td / "evidence"
+        self.claims = self.td / "claims"
+        self.doc = self.td / "doc"
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _dims(self, **kw):
+        base = dict(
+            variant_claims_dir=self.claims, variant_doc_dir=self.doc,
+            evidence_root=self.ev, decisions=[], round_actions=[],
+            reviewer_goal_alignment=0.7, reviewer_technical_correctness=0.7,
+            vc_per_claim=[],
+        )
+        base.update(kw)
+        return scorecard.compute_dimensions(**base)
+
+    def test_reviewer_scores_used_when_mechanically_clean(self):
+        # No claims/decisions/cites -> all mechanical dims are 1.0, so the
+        # continuous LLM judgments come through unchanged (no 0/1 snapping).
+        dims = self._dims(reviewer_groundedness=0.62,
+                          reviewer_completeness=0.55,
+                          reviewer_coherence=0.71)
+        self.assertAlmostEqual(dims["groundedness"], 0.62)
+        self.assertAlmostEqual(dims["completeness"], 0.55)
+        self.assertAlmostEqual(dims["coherence"], 0.71)
+
+    def test_falls_back_to_mechanical_when_reviewer_omits(self):
+        # No reviewer judgments supplied -> prior mechanical behaviour (1.0 on
+        # empty inputs).
+        dims = self._dims()
+        self.assertEqual(dims["groundedness"], 1.0)
+        self.assertEqual(dims["completeness"], 1.0)
+        self.assertEqual(dims["coherence"], 1.0)
+
+    def test_mechanical_defect_caps_reviewer_groundedness(self):
+        # One claim citing nonexistent evidence -> mechanical groundedness 0.0
+        # caps a generous reviewer score to 0.0.
+        self.claims.mkdir(parents=True)
+        (self.claims / "cl-000001.json").write_text(
+            json.dumps({"evidence_ids": ["ev-999999"]}))
+        dims = self._dims(reviewer_groundedness=0.9)
+        self.assertEqual(dims["groundedness"], 0.0)
+
+
 class GateTest(unittest.TestCase):
     BASE = {d: 0.5 for d in scorecard.DIMENSIONS}
 

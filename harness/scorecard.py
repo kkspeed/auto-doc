@@ -149,6 +149,23 @@ def compute_technical_correctness(
 # ----- Aggregate + gate ------------------------------------------------------
 
 
+def _cap(llm_score: float | None, mechanical: float) -> float:
+    """Combine an LLM-judged quality score with its mechanical check.
+
+    The mechanical check is a *sanity cap*, not the score itself: objective
+    defects (dead citations, ungrounded claims, missing sections) limit the
+    score via min(), but a mechanically-clean dimension (mechanical == 1.0)
+    lets the LLM's continuous judgment through instead of snapping to 1.0 —
+    which is what made the old count-fraction scores binary on small inputs.
+
+    Falls back to the mechanical value when the reviewer did not judge this
+    dimension (llm_score is None), so an omitted score degrades gracefully to
+    the prior behaviour rather than failing the round."""
+    if llm_score is None:
+        return mechanical
+    return min(llm_score, mechanical)
+
+
 def compute_dimensions(
     *,
     variant_claims_dir: Path,
@@ -159,16 +176,29 @@ def compute_dimensions(
     reviewer_goal_alignment: float,
     reviewer_technical_correctness: float,
     vc_per_claim: list[dict],
+    reviewer_groundedness: float | None = None,
+    reviewer_completeness: float | None = None,
+    reviewer_coherence: float | None = None,
 ) -> dict:
-    """Compute all six dimensions. Returns {dim: float} keyed by DIMENSIONS."""
+    """Compute all six dimensions. Returns {dim: float} keyed by DIMENSIONS.
+
+    groundedness/completeness/coherence are LLM-judged (continuous) capped by
+    their mechanical check (see _cap); goal_alignment/technical_correctness are
+    reviewer-judged; constitution_compliance is a mechanical policy count."""
     vc_rate = compute_vc_confirm_rate(vc_per_claim)
     return {
-        "groundedness": compute_groundedness(variant_claims_dir, evidence_root),
+        "groundedness": _cap(
+            reviewer_groundedness,
+            compute_groundedness(variant_claims_dir, evidence_root)),
         "goal_alignment": reviewer_goal_alignment,
         "technical_correctness": compute_technical_correctness(
             reviewer_technical_correctness, vc_rate),
-        "completeness": compute_completeness(decisions, variant_doc_dir),
-        "coherence": compute_coherence(variant_doc_dir, evidence_root),
+        "completeness": _cap(
+            reviewer_completeness,
+            compute_completeness(decisions, variant_doc_dir)),
+        "coherence": _cap(
+            reviewer_coherence,
+            compute_coherence(variant_doc_dir, evidence_root)),
         "constitution_compliance": compute_constitution_compliance(
             round_actions),
     }
