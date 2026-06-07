@@ -160,6 +160,34 @@ To resume in a fresh clone of a workspace, re-wire the hooks first:
 harness init ./my-design --reactivate
 ```
 
+### Editing config between runs
+
+`goal.toml` and `harness.toml` are tracked, and every commit must carry an
+`Action` trailer that the commit-msg hook validates — so a hand-made `git
+commit` of a config tweak is fiddly. Use the helper, which stages only the
+config file(s) and attaches the right trailer:
+
+```bash
+harness commit-config -m "raise max_rounds to 300" --workspace ./my-design
+```
+
+### Resetting a workspace
+
+Roll a workspace back to a clean starting point. Round numbering is derived from
+the `rounds/` directory, so this also clears it to restart at round 1.
+
+```bash
+# Keep the seeded docs + round-0 baseline; just discard the rounds since then:
+harness reset --to seed --workspace ./my-design
+
+# Bare workspace — re-seeds and re-scores on the next run (use after editing
+# seed_doc.md or goal.toml):
+harness reset --to scaffold --workspace ./my-design
+```
+
+Both prompt for confirmation (they hard-reset git and delete round artifacts);
+pass `--yes` to skip the prompt.
+
 ---
 
 ## Model configuration

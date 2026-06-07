@@ -153,6 +153,138 @@ def cmd_run(
     return 0
 
 
+# Commit messages whose subjects mark the two reset anchors (see orchestrator/
+# cli init). Matched literally against `git log --grep --fixed-strings`.
+_SEED_MARKER = "harness: seed variant documents"
+_SCAFFOLD_MARKER = "harness: scaffold workspace"
+
+# Untracked (gitignored) runtime artifacts that `git reset --hard` cannot
+# remove. Deleting rounds/ is what actually restarts numbering at round 1 —
+# _next_round_number scans that directory, not git history.
+_RUNTIME_ARTIFACTS = ("rounds", "derived/decisions.json",
+                      "CONTEXT.md", "morning_brief.md")
+
+# Explicit identity so commits work on machines without a global git user
+# (CI, fresh dev boxes) — mirrors cmd_init.
+_HARNESS_IDENTITY = ("-c", "user.email=harness@localhost",
+                     "-c", "user.name=harness")
+
+
+def _find_anchor_commit(workspace: Path, marker: str) -> str | None:
+    """SHA of the most recent commit whose message contains `marker`, or None.
+    Most-recent matters: after a reset-to-scaffold + re-run, a fresh seed commit
+    is created, and we want the current epoch's anchor."""
+    result = subprocess.run(
+        ["git", "-C", str(workspace), "log", "--grep", marker,
+         "--fixed-strings", "--format=%H", "-1"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip().split("\n")[0].strip()
+    return sha or None
+
+
+def cmd_reset(workspace: Path, target: str, assume_yes: bool) -> int:
+    """Reset the workspace to its seed (default) or scaffold anchor commit and
+    delete untracked round artifacts so the next run restarts at round 1."""
+    if not (workspace / ".git").exists():
+        print(f"harness reset: {workspace} is not a git repository",
+              file=sys.stderr)
+        return 1
+    marker = _SEED_MARKER if target == "seed" else _SCAFFOLD_MARKER
+    sha = _find_anchor_commit(workspace, marker)
+    if sha is None:
+        print(f"harness reset: no commit matching {marker!r} found in "
+              f"{workspace} — nothing to reset to", file=sys.stderr)
+        return 1
+    short = sha[:9]
+    print(f"harness reset --to {target}: will hard-reset {workspace} to "
+          f"{short} and delete round artifacts "
+          f"({', '.join(_RUNTIME_ARTIFACTS)}).")
+    print("This permanently discards every round and commit made after that "
+          "point.")
+    if not assume_yes:
+        try:
+            resp = input("Continue? [y/N] ")
+        except EOFError:
+            resp = ""
+        if resp.strip().lower() not in ("y", "yes"):
+            print("harness reset: aborted.")
+            return 1
+    reset = subprocess.run(
+        ["git", "-C", str(workspace), "reset", "--hard", sha],
+        capture_output=True, text=True,
+    )
+    if reset.returncode != 0:
+        print(f"harness reset: git reset failed: {reset.stderr.strip()}",
+              file=sys.stderr)
+        return 1
+    removed = []
+    for rel in _RUNTIME_ARTIFACTS:
+        p = workspace / rel
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+            removed.append(rel)
+        elif p.exists():
+            p.unlink()
+            removed.append(rel)
+    print(f"harness reset: reset to {short} ({target}).")
+    if removed:
+        print(f"  removed: {', '.join(removed)}")
+    return 0
+
+
+def _config_files_changed(workspace: Path, files: list[str]) -> list[str]:
+    """Subset of `files` that differ from HEAD (staged or unstaged)."""
+    changed = []
+    for f in files:
+        r = subprocess.run(
+            ["git", "-C", str(workspace), "diff", "--quiet", "HEAD", "--", f],
+            capture_output=True,
+        )
+        if r.returncode == 1:  # --quiet implies --exit-code: 1 == differs
+            changed.append(f)
+    return changed
+
+
+def cmd_commit_config(workspace: Path, message: str | None) -> int:
+    """Commit manual goal.toml / harness.toml edits with the Action: init
+    trailer the commit-msg hook requires. init is the only Action whose
+    file-whitelist is unrestricted (so harness.toml is allowed) and it is
+    present in every existing workspace's hook, so this needs no hook change."""
+    if not (workspace / ".git").exists():
+        print(f"harness commit-config: {workspace} is not a git repository",
+              file=sys.stderr)
+        return 1
+    candidates = [f for f in ("goal.toml", "harness.toml")
+                  if (workspace / f).exists()]
+    if not candidates:
+        print(f"harness commit-config: no goal.toml or harness.toml in "
+              f"{workspace}", file=sys.stderr)
+        return 1
+    changed = _config_files_changed(workspace, candidates)
+    if not changed:
+        print("harness commit-config: no changes to goal.toml or harness.toml.")
+        return 0
+    msg = message or f"harness: update config ({', '.join(changed)})"
+    full = f"{msg}\n\nAction: init\n"
+    # Pathspec commit (`-- <files>`): commits ONLY these paths' working-tree
+    # state, leaving any other staged changes untouched and out of the commit.
+    commit = subprocess.run(
+        ["git", "-C", str(workspace), *_HARNESS_IDENTITY,
+         "commit", "-m", full, "--", *changed],
+        capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        print("harness commit-config: commit failed (commit-msg hook?):\n"
+              f"{(commit.stderr or commit.stdout).strip()}", file=sys.stderr)
+        return 1
+    print(f"harness commit-config: committed {', '.join(changed)} "
+          "(Action: init).")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="harness",
@@ -179,11 +311,38 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--workspace", type=Path, default=Path.cwd(),
                        help="Workspace directory (default: cwd)")
 
+    reset_p = subparsers.add_parser(
+        "reset",
+        help="Reset the workspace to its seed or scaffold state")
+    reset_p.add_argument(
+        "--to", choices=["seed", "scaffold"], default="seed",
+        help="Reset target: 'seed' keeps the seeded docs + round-0 baseline "
+             "and restarts at round 1 (default); 'scaffold' returns to a bare "
+             "workspace that re-seeds on the next run (use after editing "
+             "seed_doc.md / goal.toml)")
+    reset_p.add_argument("--workspace", type=Path, default=Path.cwd(),
+                         help="Workspace directory (default: cwd)")
+    reset_p.add_argument("-y", "--yes", action="store_true",
+                         help="Skip the confirmation prompt")
+
+    cfg_p = subparsers.add_parser(
+        "commit-config",
+        help="Commit manual goal.toml / harness.toml edits with the required "
+             "Action trailer")
+    cfg_p.add_argument("-m", "--message", default=None,
+                       help="Commit message (default: auto-generated)")
+    cfg_p.add_argument("--workspace", type=Path, default=Path.cwd(),
+                       help="Workspace directory (default: cwd)")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         return cmd_init(args.dir, args.reactivate)
     if args.cmd == "run":
         return cmd_run(args.workspace, args.rounds, args.hours, args.variants)
+    if args.cmd == "reset":
+        return cmd_reset(args.workspace, args.to, args.yes)
+    if args.cmd == "commit-config":
+        return cmd_commit_config(args.workspace, args.message)
     return 1
 
 
