@@ -307,6 +307,10 @@ DESIGNER_PROMPT = (
     "fields: round, variant, patch_diff (unified-diff text or empty string), "
     "evidence (list of {id, confidence, citations, claim, excerpt, ...}), "
     "claims (list of cl-*.json dicts). "
+    "patch_diff MUST be a standard `git diff` unified diff that uses `a/` and "
+    "`b/` path prefixes, and it may ONLY create or modify section files under "
+    "variants/nodes/<variant>/doc/ for THIS variant — any hunk touching a path "
+    "outside that directory rejects the whole round. "
     "Before answering, read every path listed under 'Read these first (on "
     "disk)' in the CONTEXT above; do not rely on the summary tables alone. "
     "Output ONLY valid JSON."
@@ -728,8 +732,46 @@ def _materialize_designer_output(
                 f"variants/nodes/{variant_id}/claims/{cl_id}.json")
 
         # patch_diff: if non-empty, apply with `git apply`. Empty is a no-op.
+        #
+        # The set of paths recorded here is load-bearing twice over: the merge
+        # commit stages exactly these (round_ledger.commit_merge), and a reject
+        # discards exactly these (_discard_materialized). It MUST equal what
+        # `git apply` actually writes to the worktree. Re-parsing the diff text
+        # for `+++ b/...` lines does NOT guarantee that — a diff that omits the
+        # `a/`/`b/` prefixes resolves to a different path under git's -p
+        # stripping, and a diff that touches a file outside this variant's doc/
+        # tree is applied but silently dropped by a doc-prefix filter. Either
+        # leaves an untracked/modified file behind that the next round's
+        # assert_clean_worktree aborts on (DirtyWorktreeError -> the whole run
+        # dies with "workspace has uncommitted changes").
+        #
+        # `git apply --numstat` reports the authoritative target paths, resolved
+        # with the SAME -p stripping the real apply uses, without touching the
+        # tree. We take that as the source of truth, enforce the doc-scope
+        # invariant on it (an out-of-scope write is a hard materialize failure,
+        # which the caller turns into a clean round rejection), then apply.
         patch_diff = parsed.get("patch_diff", "") or ""
         if patch_diff.strip():
+            numstat = subprocess.run(
+                ["git", "-C", str(workspace_root), "apply", "--numstat",
+                 "--whitespace=nowarn"],
+                input=patch_diff, text=True, capture_output=True)
+            if numstat.returncode != 0:
+                raise RuntimeError(
+                    f"git apply --numstat failed: {numstat.stderr.strip()}")
+            touched: list[str] = []
+            for line in numstat.stdout.splitlines():
+                # numstat format: "<added>\t<deleted>\t<path>"
+                parts = line.split("\t")
+                if len(parts) >= 3 and parts[2]:
+                    touched.append(parts[2])
+            allowed_prefix = f"variants/nodes/{variant_id}/doc/"
+            out_of_scope = sorted(
+                p for p in touched if not p.startswith(allowed_prefix))
+            if out_of_scope:
+                raise RuntimeError(
+                    "patch_diff writes outside this variant's doc scope "
+                    f"({allowed_prefix}): {', '.join(out_of_scope)}")
             result = subprocess.run(
                 ["git", "-C", str(workspace_root), "apply",
                  "--whitespace=nowarn"],
@@ -737,14 +779,9 @@ def _materialize_designer_output(
             if result.returncode != 0:
                 raise RuntimeError(
                     f"git apply failed: {result.stderr.strip()}")
-            # Extract section paths from the patch_diff (lines starting with
-            # `+++ b/`).
-            for line in patch_diff.split("\n"):
-                if line.startswith("+++ b/"):
-                    rel = line[len("+++ b/"):].strip()
-                    if rel.startswith(f"variants/nodes/{variant_id}/doc/"):
-                        section_paths.append(rel)
-                        materialized.append(workspace_root / rel)
+            for rel in touched:
+                section_paths.append(rel)
+                materialized.append(workspace_root / rel)
 
         # Write the round's patch.diff pointer (always, even when empty) under
         # the TRUSTED round_id so Reviewer/Verifier-C can point at a stable

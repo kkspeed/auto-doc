@@ -1102,6 +1102,83 @@ class MaterializeFailLoudTest(unittest.TestCase):
                    / "patch.diff").read_text()
         self.assertEqual(content, "")
 
+    # --- patch_diff staging must equal what git apply actually writes ---------
+    # Regression guard: a section authored via patch_diff that the path-capture
+    # misses is neither committed (merge) nor discarded (reject), leaving the
+    # worktree dirty so the next round's assert_clean_worktree aborts the run
+    # with "workspace has uncommitted changes".
+
+    def _git_status(self):
+        return subprocess.run(
+            ["git", "-C", str(self.ws), "status", "--porcelain"],
+            capture_output=True, text=True).stdout.strip()
+
+    def test_in_scope_new_section_is_captured_for_staging(self):
+        _commit_setup(self.ws)
+        diff = (
+            "diff --git a/variants/nodes/v-001/doc/01-x.md "
+            "b/variants/nodes/v-001/doc/01-x.md\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/variants/nodes/v-001/doc/01-x.md\n"
+            "@@ -0,0 +1 @@\n+hi\n")
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": diff, "evidence": [], "claims": []}
+        _materialized, section_paths, _c, _a, _e = \
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", "round-000001", parsed)
+        self.assertIn("variants/nodes/v-001/doc/01-x.md", section_paths)
+        self.assertTrue(
+            (self.ws / "variants/nodes/v-001/doc/01-x.md").exists())
+
+    def test_out_of_scope_path_raises_and_leaves_tree_clean(self):
+        _commit_setup(self.ws)
+        diff = (
+            "diff --git a/NOTES.md b/NOTES.md\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/NOTES.md\n"
+            "@@ -0,0 +1 @@\n+oops\n")
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": diff, "evidence": [], "claims": []}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", "round-000001", parsed)
+        # numstat is a dry run — nothing should have been written to the tree.
+        self.assertEqual(self._git_status(), "")
+        self.assertFalse((self.ws / "NOTES.md").exists())
+
+    def test_missing_ab_prefix_resolving_out_of_scope_raises(self):
+        _commit_setup(self.ws)
+        # No `a/`/`b/` prefixes: git's -p stripping resolves this to
+        # "nodes/v-001/doc/01-x.md", outside the variant doc scope.
+        diff = (
+            "--- /dev/null\n"
+            "+++ variants/nodes/v-001/doc/01-x.md\n"
+            "@@ -0,0 +1 @@\n+hi\n")
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": diff, "evidence": [], "claims": []}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", "round-000001", parsed)
+        self.assertEqual(self._git_status(), "")
+
+    def test_wrong_variant_doc_path_raises(self):
+        _commit_setup(self.ws)
+        diff = (
+            "diff --git a/variants/nodes/v-002/doc/01-x.md "
+            "b/variants/nodes/v-002/doc/01-x.md\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/variants/nodes/v-002/doc/01-x.md\n"
+            "@@ -0,0 +1 @@\n+hi\n")
+        parsed = {"round": "round-000001", "variant": "v-001",
+                  "patch_diff": diff, "evidence": [], "claims": []}
+        with self.assertRaises(RuntimeError):
+            orchestrator._materialize_designer_output(
+                self.ws, "v-001", "round-000001", parsed)
+        self.assertEqual(self._git_status(), "")
+
 
 class ValidateDesignerStrictTest(unittest.TestCase):
     def test_non_string_patch_diff_raises(self):
