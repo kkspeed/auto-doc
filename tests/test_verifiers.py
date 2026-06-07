@@ -104,10 +104,13 @@ def _write_section(variants_root, variant, name, tags, body):
     return fp
 
 
-def _write_evidence(evidence_root, ev_id, excerpt=None, superseded_by=None):
+def _write_evidence(evidence_root, ev_id, excerpt=None, superseded_by=None,
+                    source=None):
     """Write evidence/ev-<ev_id>.md with TOML frontmatter."""
     evidence_root.mkdir(parents=True, exist_ok=True)
     lines = ["+++", f'id = "ev-{ev_id}"']
+    if source is not None:
+        lines.append(f'source = "{source}"')
     if excerpt is not None:
         # TOML triple-quoted string for multi-line safety
         escaped = excerpt.replace('"""', '\\"\\"\\"')
@@ -401,10 +404,13 @@ class VerifyExcerptMatchTest(unittest.TestCase):
         self.assertIn("no usable excerpt", result.failures[0].detail)
 
     def test_threshold_parameter_respected(self):
-        # Same fixture: short excerpt, longer body sentence — moderate match.
-        excerpt = "exponential backoff with full jitter"
+        # Partial coverage: about two-thirds of the excerpt appears in the doc
+        # paragraph; the rest ("and a circuit breaker") does not. Passes at a
+        # permissive threshold, fails at a strict one.
+        excerpt = "exponential backoff with full jitter and a circuit breaker"
         _write_evidence(self.evidence, "000001", excerpt=excerpt)
-        body = "The retry policy uses exponential backoff with full jitter for transient failures [^ev-000001].\n"
+        body = ("The retry policy uses exponential backoff with full jitter "
+                "for transient failures [^ev-000001].\n")
         _write_section(self.variants, "v-001", "01-x", ["decided"], body)
         permissive = v.verify_excerpt_match(self.variants, self.evidence,
                                             threshold=0.5)
@@ -412,6 +418,50 @@ class VerifyExcerptMatchTest(unittest.TestCase):
                                         threshold=0.99)
         self.assertEqual(permissive.verdict, "pass")
         self.assertEqual(strict.verdict, "fail")
+
+    def test_verbatim_quote_with_surrounding_prose_passes(self):
+        # The regression: a faithful verbatim quote wrapped in lots of doc prose.
+        # The old symmetric ratio scored this ~0.26 (rejected at 0.92); coverage
+        # scores ~1.0 because the doc's extra prose no longer counts against it.
+        excerpt = "exponential backoff with full jitter"
+        _write_evidence(self.evidence, "000001", excerpt=excerpt)
+        body = ("The retry subsystem is designed for resilience under transient "
+                "network failures. It uses exponential backoff with full jitter "
+                "to avoid thundering-herd retries, and caps the total number of "
+                "attempts to bound tail latency [^ev-000001].\n")
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)  # default 0.6
+        self.assertEqual(result.verdict, "pass", f"failures: {result.failures}")
+
+    def test_repo_sourced_evidence_is_exempt(self):
+        # A repo-adapter code excerpt the prose can't quote — exempt from
+        # text-matching (Verifier C owns it).
+        excerpt = "for attempt in range(self.max_retries):\n    time.sleep(base * 2 ** attempt)"
+        _write_evidence(self.evidence, "000001", excerpt=excerpt, source="repo")
+        body = "The client retries with bounded, backed-off attempts [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "pass", f"failures: {result.failures}")
+
+    def test_inline_evidence_same_mismatch_still_fails(self):
+        # Identical mismatch but WITHOUT a source field (designer-inline) is not
+        # exempt — confirms the exemption is source-gated, not blanket.
+        excerpt = "for attempt in range(self.max_retries):\n    time.sleep(base * 2 ** attempt)"
+        _write_evidence(self.evidence, "000001", excerpt=excerpt)  # no source
+        body = "The client retries with bounded, backed-off attempts [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(result.failures[0].kind, "excerpt-mismatch")
+
+    def test_punctuation_only_excerpt_is_no_usable_excerpt(self):
+        # Normalizes to empty -> "no usable excerpt", not a ZeroDivisionError.
+        _write_evidence(self.evidence, "000001", excerpt="... ?! --")
+        body = "Some claim [^ev-000001].\n"
+        _write_section(self.variants, "v-001", "01-x", ["decided"], body)
+        result = v.verify_excerpt_match(self.variants, self.evidence)
+        self.assertEqual(result.verdict, "fail")
+        self.assertIn("no usable excerpt", result.failures[0].detail)
 
     def test_multiple_cites_in_one_sentence_each_checked_independently(self):
         _write_evidence(self.evidence, "000001",

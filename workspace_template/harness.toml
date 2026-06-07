@@ -79,3 +79,12 @@ bootstrap_registry_size_threshold = 5   # reviewer permissive on new-decision pr
 # Merge gate: a round must improve >=1 dimension and may not drop any dimension
 # by more than this tolerance below its prior value. See harness/scorecard.py.
 regression_tolerance = 0.05
+
+
+[verifiers]
+# Verifier B (excerpt match): the fraction of a cited evidence excerpt that must
+# appear in the doc paragraph around the cite (asymmetric coverage, 0..1). The
+# doc's surrounding prose does not count against it. Adapter-sourced evidence
+# (source = "repo") is exempt — its verbatim source/code excerpt is judged by
+# Verifier C, not by text matching. Lower this if faithful quotes still trip it.
+excerpt_match_threshold = 0.6

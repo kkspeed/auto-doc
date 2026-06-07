@@ -337,8 +337,15 @@ Returns Evidence JSON. `citations[].source = "<name>"`. Schema-validated. Adding
 8. orchestrator validates + writes evidence/ev-*.md
 9. Verifier A (pure Python: cite exists at SHA?)
    FAIL → commit "verifier-a-fail", end
-10. Verifier B (pure Python: excerpt matches?)
+10. Verifier B (pure Python: excerpt coverage?)
     FAIL → commit "verifier-b-fail", end
+    Asymmetric COVERAGE: the fraction of a cited evidence excerpt present in the
+    doc paragraph around the cite (matched chars / excerpt length), so the doc's
+    surrounding prose doesn't penalize a faithful quote. Threshold from
+    `harness.toml [verifiers].excerpt_match_threshold` (default 0.6). Evidence
+    carrying a `source` frontmatter field (repo adapter / source adapters) is
+    exempt — its verbatim source/code excerpt is judged for faithfulness by
+    Verifier C, not text-matching.
 11. regenerate CONTEXT.md for Reviewer (no Designer reasoning)
 12. spawn Reviewer → review.md (+rejection JSON if reject)
     REJECT → write rj-*.md, commit "reviewer-rejected", end

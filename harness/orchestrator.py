@@ -1096,8 +1096,10 @@ def run_round(
         )
 
     # ---- Phase 4: Verifier B (excerpt match) ----
+    excerpt_threshold = harness_config.get("verifiers", {}).get(
+        "excerpt_match_threshold", 0.6)
     r_excerpt = verifiers.verify_excerpt_match(
-        variants_root, evidence_root, threshold=0.92,
+        variants_root, evidence_root, threshold=excerpt_threshold,
     )
     failure_count_b = len(r_excerpt.failures)
     _log(workspace_root, "verifier_complete",
