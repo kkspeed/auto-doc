@@ -289,6 +289,15 @@ Per-vendor template files (`adapters/cli/claude.yaml`, `adapters/cli/codex.yaml`
 
 ## 9. Repo adapter
 
+**v0 status (implemented):** designer-issued queries against a **user-provided** `repo/`. The harness does NOT manage a worktree or pin a SHA — you drop a read-only copy of the codebase into `repo/` yourself. Flow per round (Phase 2a, only when `repo/` exists):
+1. Designer **query pass**: emits `repo_queries` — the focused repo facts it needs (`build_designer_query_context` + `DESIGNER_QUERY_PROMPT`).
+2. **Resolve** (`resolve_repo_queries`): each query is answered by a `repo_adapter` spawn that reads `repo/` and returns Evidence JSON `{confidence, citations, claim, excerpt}`; the orchestrator materializes it as `evidence/ev-*.md`.
+3. Designer **author pass** (the normal designer spawn): cites the resolved `ev-*.md` (Verifier A enforces cite-resolution on disk).
+
+Best-effort: a failed query pass or adapter spawn degrades to "no extra evidence" and never aborts the round. Caching: `(repo_head_sha, question_hash) → ev_id` in `derived/repo_query_cache.json` (gitignored), validated against the evidence file still existing; `repo_head_sha` is `repo/`'s git HEAD if it is a repo, else `nosha`. Model: `[models.repo_adapter]` (falls back to the designer model). The `repo_adapter` reads real files, so the configured tool needs filesystem read access in your environment.
+
+**Deferred to v0.2 (spec target below):** harness-managed pinned-SHA worktree, role-policy/`hook_capable` read-only enforcement, source adapters.
+
 Sandbox: `cwd=workspace/`, but the role-policy denies all writes outside `rounds/{round}/scratch/`, all `bash` outside the read-only allowlist. `repo/` is also mounted read-only at OS level as belt-and-suspenders.
 
 **`hook_capable: true` required.** The repo is huge and external; in-loop enforcement of read-only matters more here than anywhere.

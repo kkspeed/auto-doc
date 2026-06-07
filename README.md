@@ -126,6 +126,17 @@ list of decisions the design must resolve. Then choose a starting state for
 
 All three flow through the same pipeline.
 
+#### Grounding in a codebase (optional)
+
+Drop a read-only copy of the relevant code into `my-design/repo/`. When `repo/`
+is present, each round runs a **repo-query pass**: the designer names the
+specific facts it needs from the code, a `repo_adapter` reads the real files and
+returns cited evidence, and the designer authors against that evidence. Results
+are cached by `(repo HEAD sha, question)` in `derived/` so unchanged questions
+aren't re-asked. It's best-effort — if the adapter can't run, the round proceeds
+without repo evidence. The adapter reads files, so the model you assign to
+`[models.repo_adapter]` must have filesystem read access in your environment.
+
 ### 3. Run the loop
 
 ```bash
@@ -170,6 +181,25 @@ config file(s) and attaches the right trailer:
 ```bash
 harness commit-config -m "raise max_rounds to 300" --workspace ./my-design
 ```
+
+### Preflight check (before a long run)
+
+`harness doctor` verifies a workspace is ready before you commit to an 8-hour
+run — it checks each role's CLI is installed, lists MCP server health, and
+**spawns each tool-enabled role once** with a sentinel-file probe to confirm its
+tools actually execute (not just that the CLI launched).
+
+```bash
+harness doctor --workspace ./my-design          # full check (spawns probes)
+harness doctor --workspace ./my-design --no-probe  # static only, no spawns
+```
+
+It reports CLIs found, surfaces MCP servers that need auth/connection as
+warnings, and marks a tool probe `FAIL` if the role couldn't read the planted
+file (i.e. its tools are denied in your environment). Exit code is non-zero only
+for hard problems (missing CLI, `mcp list` error, failed probe), so it's usable
+in a pre-run script. Run it after configuring `allowed_tools`/`mcp_config` and
+authenticating MCP servers.
 
 ### Resetting a workspace
 
@@ -246,6 +276,43 @@ model = "claude-sonnet-4-6"
 Even in single-vendor mode, prefer a *different* model for Verifier C (for
 example a smaller Claude model) so the cross-check is not the designer grading
 its own work. A weaker independent check is still more useful than none.
+
+### Tools and MCP (gh, gdrive, glean, …)
+
+A role spawn has **no tool access by default** — it only reasons over the
+context it is given. To let a role read files, shell out, or reach a workspace
+endpoint over MCP, add tool keys to its `[models.<role>]` block. This is mainly
+for `repo_adapter` (which must read `repo/`) and any source-fetching role.
+
+```toml
+[models.repo_adapter]
+tool          = "claude"
+model         = "claude-opus-4-7-20260315"
+allowed_tools = ["Read", "Grep", "Glob", "Bash(gh:*)", "mcp__gdrive"]
+mcp_config    = [".mcp.json"]      # Claude's native MCP convention
+# strict_mcp_config = true          # use only these MCP files, ignore global
+# permission_mode   = "acceptEdits" # if tools are silently denied headless
+```
+
+- `allowed_tools` — the whitelist (`Bash(gh:*)` scopes bash to `gh`; `mcp__<server>`
+  exposes an MCP server's tools). Nothing runs unless it is listed.
+- `mcp_config` — path(s) to MCP server JSON. Edit `.mcp.json` in the workspace to
+  add servers (gdrive, glean, …). A missing file is ignored.
+
+**MCP config is per-CLI — `.mcp.json` is Claude-only.** For the others, point the
+CLI at its own native MCP config:
+
+| CLI | Where MCP servers live | Relevant `[models.<role>]` keys |
+|---|---|---|
+| `claude` | `.mcp.json` | `allowed_tools`, `mcp_config`, `strict_mcp_config`, `permission_mode` |
+| `codex` | `~/.codex/config.toml` `[mcp_servers]` | `sandbox`, `extra_args = ["-c", "…"]` |
+| `gemini` | `.gemini/settings.json` (`gemini mcp`) | `mcp_server_names`, `allowed_tools`, `approval_mode` |
+
+`extra_args` (any CLI) is appended verbatim as an escape hatch for flags not
+covered above.
+
+> Tools run in the CLI's own permission/sandbox model. Give a role only the
+> tools it needs, and scope bash (`Bash(gh:*)`, not bare `Bash`).
 
 ### Run bounds and gates
 

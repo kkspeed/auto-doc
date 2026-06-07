@@ -36,7 +36,7 @@ class InitIntoNonexistentDirTest(unittest.TestCase):
                          f"stderr: {result.stderr}\nstdout: {result.stdout}")
         # Template files copied
         for rel in ("constitution.md", "goal.toml", "harness.toml",
-                    "seed_doc.md", ".gitignore",
+                    "seed_doc.md", ".gitignore", ".mcp.json",
                     "hooks/pre-commit", "hooks/commit-msg"):
             self.assertTrue((self.target / rel).exists(),
                             f"missing in scaffold: {rel}")

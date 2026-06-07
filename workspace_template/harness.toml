@@ -32,6 +32,30 @@ model = "gpt-5-20260301"
 tool  = "claude"
 model = "claude-opus-4-7-20260315"
 
+[models.repo_adapter]
+# Resolves the designer's repo queries by reading the read-only repo/ and
+# returning cited evidence. Omit this section and the harness falls back to the
+# designer model.
+tool  = "claude"
+model = "claude-opus-4-7-20260315"
+# Tool access (claude). Without an allowed_tools list the spawn cannot read
+# files — these enable grounding in repo/. Add "Bash(gh:*)" to let it shell out
+# to gh, and mcp__<server> entries to expose MCP tools (see mcp_config below).
+allowed_tools = ["Read", "Grep", "Glob", "Bash(gh:*)"]
+# Claude reads MCP servers from .mcp.json (its native convention). A missing
+# file is ignored. To reach gdrive / glean / other workspace endpoints, add the
+# server to .mcp.json and its tool to allowed_tools (e.g. "mcp__gdrive").
+mcp_config = [".mcp.json"]
+# strict_mcp_config = true    # ignore globally-configured MCP, use only the
+#                             # files above (reproducible across machines)
+# permission_mode = "acceptEdits"   # if tools are silently denied in headless
+
+# MCP is configured PER CLI TOOL — .mcp.json is Claude-only:
+#   codex:  servers live in ~/.codex/config.toml [mcp_servers]; pass overrides
+#           via extra_args = ["-c", "mcp_servers..."] and sandbox = "read-only".
+#   gemini: servers live in .gemini/settings.json (manage with `gemini mcp`);
+#           restrict via mcp_server_names = ["gdrive"] and approval_mode.
+
 
 [run]
 # Loop bounds: whichever hits first ends the run.

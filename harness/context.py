@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import datetime
 import json
-import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -85,6 +84,22 @@ def _load_goal_meta(workspace_root: Path) -> tuple[str, str]:
         return ("", "")
     g = data.get("goal", {})
     return (g.get("title", ""), g.get("description", ""))
+
+
+def _render_constitution(workspace_root: Path) -> str:
+    """Inline constitution.md verbatim into a role's context.
+
+    The constitution defines the judgment rules for every role (provenance
+    weighting, claim typing, never-invent-APIs, scope-over-speculation,
+    citation discipline, reviewer posture, slug discipline) and its own preamble
+    states it is "loaded into every CONTEXT.md". Returns '' if absent/empty."""
+    p = workspace_root / "constitution.md"
+    if not p.exists():
+        return ""
+    text = p.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        return ""
+    return "\n" + text + "\n"
 
 
 def _render_goal_and_pointers(title: str, description: str,
@@ -210,6 +225,7 @@ def build_planner_context(workspace_root: Path, round_id: str,
             f"variants/nodes/{variant_id}/doc/",
             "rejections/",
         ]))
+    out.append(_render_constitution(workspace_root))
     out.append(_render_registered_decisions(decisions))
     # Stale proposals section is omitted when empty (per spec); we don't have
     # introduced_round tracking in this sub-project, so skip the section.
@@ -223,17 +239,6 @@ def build_planner_context(workspace_root: Path, round_id: str,
 
 
 # ----- Designer ---------------------------------------------------------------
-
-
-def _extract_slug_discipline(constitution_text: str) -> str:
-    """Extract the '## Slug discipline' section from constitution.md."""
-    match = re.search(
-        r"(## Slug discipline\b.*?)(?=\n##\s|\Z)",
-        constitution_text, re.DOTALL,
-    )
-    if match:
-        return match.group(1).strip()
-    return ""
 
 
 def build_designer_context(workspace_root: Path, round_id: str,
@@ -251,6 +256,7 @@ def build_designer_context(workspace_root: Path, round_id: str,
             f"rounds/{round_id}/scratch/planner.json",
             "evidence/",
         ]))
+    out.append(_render_constitution(workspace_root))
     out.append(_render_registered_decisions(decisions))
 
     # Own positions table
@@ -291,16 +297,60 @@ def build_designer_context(workspace_root: Path, round_id: str,
         out.append("(none)")
     out.append("")
 
-    # Slug discipline (verbatim from constitution.md)
-    constitution_path = workspace_root / "constitution.md"
-    if constitution_path.exists():
-        slug_section = _extract_slug_discipline(
-            constitution_path.read_text(encoding="utf-8", errors="replace"),
-        )
-        if slug_section:
-            out.append(slug_section)
-            out.append("")
+    return "\n".join(out)
 
+
+# ----- Designer repo-query pass + repo adapter --------------------------------
+
+
+def build_designer_query_context(workspace_root: Path, round_id: str,
+                                 variant_id: str) -> str:
+    """Context for the designer's repo-query pass: same grounding material as
+    the authoring pass, but the designer's job here is to emit the repo
+    questions it needs answered (which a read-only repo adapter resolves into
+    evidence) BEFORE it authors. Only built when repo/ is present."""
+    decisions = _load_decisions(workspace_root)
+    goal_version = _load_goal_version(workspace_root)
+    title, description = _load_goal_meta(workspace_root)
+    out = [_header("designer_query", round_id, variant_id, goal_version), ""]
+    out.append(_render_goal_and_pointers(
+        title, description, [
+            "goal.toml",
+            f"variants/nodes/{variant_id}/doc/",
+            f"rounds/{round_id}/scratch/planner.json",
+            "evidence/",
+        ]))
+    out.append(_render_constitution(workspace_root))
+    out.append(_render_registered_decisions(decisions))
+    out.append(
+        "\n## Repo grounding\n\n"
+        "A read-only copy of the codebase is available at `repo/`. You cannot "
+        "read it directly — instead, emit the specific questions you need "
+        "answered about it. Each question is resolved by a repo adapter that "
+        "reads the actual files and returns cited evidence you will then "
+        "author against. Ask focused, answerable questions (one fact each); "
+        "skip questions the existing evidence already answers.\n")
+    return "\n".join(out)
+
+
+def build_repo_adapter_context(workspace_root: Path, round_id: str,
+                               variant_id: str, question: str) -> str:
+    """Context for one repo-adapter query: the question + the read-only repo
+    pointer + the constitution's evidence-discipline rules."""
+    goal_version = _load_goal_version(workspace_root)
+    title, description = _load_goal_meta(workspace_root)
+    out = [_header("repo_adapter", round_id, variant_id, goal_version), ""]
+    out.append(_render_goal_and_pointers(
+        title, description, ["repo/"]))
+    out.append(_render_constitution(workspace_root))
+    out.append(
+        "\n## Query\n\n"
+        f"{question}\n\n"
+        "Read the actual files under `repo/` (read-only) to answer. Quote, "
+        "don't paraphrase: the `excerpt` must be a verbatim span from a real "
+        "file, and `citations[].ref` must name the file (and line range) it "
+        "came from. If the repo does not answer the question, return "
+        "`confidence: \"low\"` and say so in `claim` rather than inventing.\n")
     return "\n".join(out)
 
 
@@ -347,6 +397,7 @@ def build_reviewer_context(workspace_root: Path, round_id: str,
             "evidence/",
             f"variants/nodes/{variant_id}/doc/",
         ]))
+    out.append(_render_constitution(workspace_root))
     out.append(_render_registered_decisions(decisions))
 
     # All positions across all variants
@@ -439,6 +490,7 @@ def build_verifier_c_context(workspace_root: Path, round_id: str,
             f"variants/nodes/{variant_id}/claims/",
             "evidence/",
         ]))
+    out.append(_render_constitution(workspace_root))
     out.append(_render_registered_decisions(decisions))
     return "\n".join(out)
 
@@ -456,7 +508,7 @@ def build_seed_judge_context(workspace_root: Path, variant_id: str) -> str:
     out.append(_render_goal_and_pointers(
         title, description, [
             f"variants/nodes/{variant_id}/doc/",
-            "constitution.md",
         ]))
+    out.append(_render_constitution(workspace_root))
     out.append(_render_registered_decisions(decisions))
     return "\n".join(out)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import secrets
 import shutil
 import subprocess
 import sys
@@ -285,6 +286,174 @@ def cmd_commit_config(workspace: Path, message: str | None) -> int:
     return 0
 
 
+# Config keys that grant a role tool access (see harness/spawn.py invokers).
+_TOOL_ACCESS_KEYS = ("allowed_tools", "mcp_config", "mcp_server_names",
+                     "sandbox", "extra_args")
+# Tool-name prefixes that can read a planted file (so the read-probe is valid).
+_FILE_TOOL_PREFIXES = ("Read", "Bash", "Grep", "Glob", "Edit", "Write")
+
+
+def _role_has_tools(cfg: dict) -> bool:
+    return any(cfg.get(k) for k in _TOOL_ACCESS_KEYS)
+
+
+def _role_has_file_tools(cfg: dict) -> bool:
+    allowed = cfg.get("allowed_tools") or []
+    if not isinstance(allowed, list):
+        return False
+    return any(str(t).split("(")[0] in _FILE_TOOL_PREFIXES for t in allowed)
+
+
+def _mcp_list(tool: str, workspace: Path) -> tuple[int, str]:
+    """Run `<tool> mcp list` from the workspace (so project MCP config is seen).
+    Returns (returncode, combined output). returncode 127-ish style errors are
+    surfaced as-is."""
+    try:
+        r = subprocess.run([tool, "mcp", "list"], cwd=str(workspace),
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, f"could not run `{tool} mcp list`: {e}"
+    return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+
+
+def _probe_role(workspace: Path, harness_config: dict, role: str,
+                nonce: str, rel_probe_path: str) -> tuple[str, str]:
+    """Spawn one role with a sentinel-file read task. PASS only if the role
+    actually read the planted nonce back — proving its tools execute (not just
+    that the CLI ran). Returns (status, detail) with status in {ok, fail}."""
+    from harness.spawn import spawn_role
+
+    prompt = (
+        f"PREFLIGHT PROBE. A file exists at `{rel_probe_path}` relative to your "
+        "working directory. Use your tools (the Read tool, or `cat` via Bash) "
+        "to read its entire contents, then output ONLY this JSON: "
+        '{"nonce": "<the file contents, trimmed>"}. You MUST actually read the '
+        "file with a tool — do not guess or echo this prompt.")
+
+    def _validator(d: dict) -> None:
+        if not isinstance(d.get("nonce"), str):
+            raise ValueError("probe response missing string 'nonce'")
+
+    result = spawn_role(
+        role=role, harness_config=harness_config,
+        context_md="# Doctor preflight probe\n", prompt=prompt,
+        workspace_root=workspace, round_id="doctor", variant_id=None,
+        validator=_validator)
+    if result.verdict != "ok":
+        return "fail", f"{result.verdict}: {result.stderr_tail or 'no detail'}"
+    got = ((result.parsed or {}).get("nonce") or "").strip()
+    if got == nonce:
+        return "ok", "tools work (read the planted file)"
+    return ("fail",
+            "CLI ran but the file was NOT read back — tool likely denied in "
+            f"this environment (expected the nonce, got {got!r:.40})")
+
+
+def cmd_doctor(workspace: Path, run_probes: bool) -> int:
+    """Preflight: verify each role's CLI is present, MCP servers resolve, and
+    tool-enabled roles can actually execute tools — before a long run."""
+    import tomllib
+
+    harness_toml = workspace / "harness.toml"
+    if not harness_toml.exists():
+        print(f"harness doctor: {harness_toml} not found "
+              "(workspace not scaffolded?)", file=sys.stderr)
+        return 1
+    with harness_toml.open("rb") as f:
+        config = tomllib.load(f)
+    models = config.get("models", {})
+    if not isinstance(models, dict) or not models:
+        print("harness doctor: no [models] configured", file=sys.stderr)
+        return 1
+
+    problems = 0
+    warnings = 0
+    print(f"harness doctor — {workspace}\n")
+
+    # 1. CLI binaries
+    print("CLIs:")
+    tools = sorted({c.get("tool") for c in models.values()
+                    if isinstance(c, dict) and c.get("tool")})
+    for t in tools:
+        path = shutil.which(t)
+        if path:
+            print(f"  {t:10} ok       {path}")
+        else:
+            print(f"  {t:10} MISSING  not on PATH")
+            problems += 1
+
+    # 2. MCP health (per tool with MCP configured in some role)
+    mcp_tools = sorted({
+        c["tool"] for c in models.values()
+        if isinstance(c, dict) and c.get("tool")
+        and (c.get("mcp_config") or c.get("mcp_server_names"))})
+    if mcp_tools:
+        print("\nMCP servers:")
+        for t in mcp_tools:
+            if not shutil.which(t):
+                continue  # already flagged as missing above
+            rc, out = _mcp_list(t, workspace)
+            print(f"  `{t} mcp list` -> {'ok' if rc == 0 else 'ERROR'}")
+            for line in (out.splitlines() or ["(no output)"])[:25]:
+                print(f"    {line}")
+            if rc != 0:
+                problems += 1
+            # `<tool> mcp list` often exits 0 even when servers need auth or are
+            # unreachable — scan the output so those don't read as "all good".
+            unhealthy = [ln for ln in out.splitlines()
+                         if any(marker in ln.lower() for marker in
+                                ("needs authentication", "not connected",
+                                 "failed", "error", "unauthenticated",
+                                 "timed out", "✗"))]
+            if unhealthy:
+                warnings += len(unhealthy)
+                print(f"    ⚠ {len(unhealthy)} server(s) need attention "
+                      "(auth/connection) — only matters if a role uses them")
+
+    # 3. Live tool probes
+    tool_roles = [(r, c) for r, c in models.items()
+                  if isinstance(c, dict) and _role_has_tools(c)]
+    if not tool_roles:
+        print("\nNo tool-enabled roles configured — nothing to probe.")
+    elif not run_probes:
+        names = ", ".join(r for r, _ in tool_roles)
+        print(f"\nTool probes skipped (--no-probe). Tool-enabled roles: {names}")
+    else:
+        print("\nTool probes (spawning each tool-enabled role once):")
+        nonce = secrets.token_hex(8)
+        rel = "rounds/doctor/probe.txt"
+        (workspace / "rounds" / "doctor").mkdir(parents=True, exist_ok=True)
+        (workspace / rel).write_text(nonce)
+        for role, cfg in tool_roles:
+            tool = cfg.get("tool", "")
+            if not shutil.which(tool):
+                print(f"  {role:14} skip    {tool} not on PATH (see above)")
+                continue
+            if not _role_has_file_tools(cfg):
+                print(f"  {role:14} n/a     no file tools to probe; rely on "
+                      "MCP check above")
+                continue
+            status, detail = _probe_role(workspace, config, role, nonce, rel)
+            print(f"  {role:14} {'ok  ' if status == 'ok' else 'FAIL'}    "
+                  f"{detail}")
+            if status != "ok":
+                problems += 1
+
+    print()
+    if problems:
+        print(f"{problems} problem(s) found"
+              + (f", {warnings} warning(s)" if warnings else "")
+              + " — fix before a long/overnight run.")
+        return 1
+    if warnings:
+        print(f"All hard checks passed; {warnings} warning(s) above "
+              "(MCP servers needing auth/connection — authenticate any your "
+              "roles actually use).")
+        return 0
+    print("All checks passed.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="harness",
@@ -334,6 +503,16 @@ def main(argv: list[str] | None = None) -> int:
     cfg_p.add_argument("--workspace", type=Path, default=Path.cwd(),
                        help="Workspace directory (default: cwd)")
 
+    doctor_p = subparsers.add_parser(
+        "doctor",
+        help="Preflight: check each role's CLI, MCP servers, and tool access "
+             "before a run")
+    doctor_p.add_argument("--workspace", type=Path, default=Path.cwd(),
+                          help="Workspace directory (default: cwd)")
+    doctor_p.add_argument(
+        "--no-probe", action="store_true",
+        help="Static checks only — skip spawning tool-enabled roles")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         return cmd_init(args.dir, args.reactivate)
@@ -343,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_reset(args.workspace, args.to, args.yes)
     if args.cmd == "commit-config":
         return cmd_commit_config(args.workspace, args.message)
+    if args.cmd == "doctor":
+        return cmd_doctor(args.workspace, not args.no_probe)
     return 1
 
 

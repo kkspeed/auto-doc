@@ -200,16 +200,96 @@ def _run_with_heartbeat(
 # ----- Tool invokers (CLI argv builders) --------------------------------------
 
 
-def _invoke_claude(model: str) -> list[str]:
-    return ["claude", "-p", "--output-format", "json", "--model", model]
+def _as_str_list(v) -> list[str]:
+    """Normalize a config value to a list of strings (str -> [str], list ->
+    [str...], anything else / None -> [])."""
+    if v is None:
+        return []
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, list):
+        return [str(x) for x in v]
+    return []
 
 
-def _invoke_codex(model: str) -> list[str]:
-    return ["codex", "exec", "--model", model, "--json"]
+def _effective_tool_cfg(role_cfg: dict, workspace_root) -> dict:
+    """Return a copy of role_cfg with mcp_config filtered to files that exist
+    (resolved against the spawn cwd = workspace_root). A configured-but-missing
+    .mcp.json must not make `claude --mcp-config` error out and fail the spawn —
+    a missing MCP file just means "no MCP this run"."""
+    mcp = _as_str_list(role_cfg.get("mcp_config"))
+    if not mcp:
+        return role_cfg
+    # workspace_root / m yields m itself when m is absolute, so this resolves
+    # both relative and absolute paths correctly.
+    present = [m for m in mcp if (workspace_root / m).exists()]
+    if present == mcp:
+        return role_cfg
+    cfg = dict(role_cfg)
+    cfg["mcp_config"] = present
+    return cfg
 
 
-def _invoke_gemini(model: str) -> list[str]:
-    return ["gemini", "--model", model, "--output", "json"]
+def _invoke_claude(model: str, cfg: dict | None = None) -> list[str]:
+    """Build the `claude -p` argv, adding tool/MCP flags from the role config.
+
+    Tool access is OFF unless the role config opts in. Recognized keys:
+      - allowed_tools: list of tool patterns, e.g. "Read", "Grep",
+        "Bash(gh:*)", "mcp__gdrive" (-> --allowedTools). Presence enables tools.
+      - mcp_config: path(s) to MCP server JSON, e.g. ".mcp.json"
+        (-> --mcp-config). This is Claude's native MCP convention.
+      - strict_mcp_config: bool -> --strict-mcp-config (ignore global MCP,
+        use only the listed files — reproducible).
+      - permission_mode: one of claude's modes (e.g. "acceptEdits",
+        "bypassPermissions") -> --permission-mode.
+      - extra_args: raw argv appended verbatim (escape hatch).
+    """
+    cfg = cfg or {}
+    cmd = ["claude", "-p", "--output-format", "json", "--model", model]
+    mcp = _as_str_list(cfg.get("mcp_config"))
+    if mcp:
+        cmd += ["--mcp-config", *mcp]
+        if cfg.get("strict_mcp_config"):
+            cmd.append("--strict-mcp-config")
+    allowed = _as_str_list(cfg.get("allowed_tools"))
+    if allowed:
+        cmd += ["--allowedTools", *allowed]
+    if cfg.get("permission_mode"):
+        cmd += ["--permission-mode", str(cfg["permission_mode"])]
+    cmd += _as_str_list(cfg.get("extra_args"))
+    return cmd
+
+
+def _invoke_codex(model: str, cfg: dict | None = None) -> list[str]:
+    """Build the `codex exec` argv. NOTE: codex does NOT read `.mcp.json`; its
+    MCP servers live in ~/.codex/config.toml [mcp_servers] (or via -c overrides).
+    Recognized keys: sandbox -> --sandbox; extra_args -> appended verbatim
+    (use this for `-c mcp_servers...`, `--profile`, etc.)."""
+    cfg = cfg or {}
+    cmd = ["codex", "exec", "--model", model, "--json"]
+    if cfg.get("sandbox"):
+        cmd += ["--sandbox", str(cfg["sandbox"])]
+    cmd += _as_str_list(cfg.get("extra_args"))
+    return cmd
+
+
+def _invoke_gemini(model: str, cfg: dict | None = None) -> list[str]:
+    """Build the `gemini` argv. NOTE: gemini does NOT read `.mcp.json`; its MCP
+    servers live in .gemini/settings.json (manage via `gemini mcp`). Recognized
+    keys: mcp_server_names -> --allowed-mcp-server-names; allowed_tools ->
+    --allowed-tools; approval_mode -> --approval-mode; extra_args -> appended."""
+    cfg = cfg or {}
+    cmd = ["gemini", "--model", model, "--output", "json"]
+    names = _as_str_list(cfg.get("mcp_server_names"))
+    if names:
+        cmd += ["--allowed-mcp-server-names", *names]
+    allowed = _as_str_list(cfg.get("allowed_tools"))
+    if allowed:
+        cmd += ["--allowed-tools", *allowed]
+    if cfg.get("approval_mode"):
+        cmd += ["--approval-mode", str(cfg["approval_mode"])]
+    cmd += _as_str_list(cfg.get("extra_args"))
+    return cmd
 
 
 _TOOL_INVOKERS = {
@@ -371,7 +451,7 @@ def spawn_role(
     scratch_dir.mkdir(parents=True, exist_ok=True)
     (scratch_dir / f"{role}.context.md").write_text(context_md)
 
-    cmd = _TOOL_INVOKERS[tool](model)
+    cmd = _TOOL_INVOKERS[tool](model, _effective_tool_cfg(role_cfg, workspace_root))
     stdin_text = context_md + "\n\n" + prompt
 
     # --- Pass 1: invoke ---

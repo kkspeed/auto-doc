@@ -13,6 +13,7 @@ sequence.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import re
 import subprocess
@@ -109,10 +110,15 @@ def validate_designer_json(d: dict) -> None:
     for c in d["claims"]:
         cg.Claim.from_dict(c)  # slug + required-field checks
         for ref in c.get("evidence_ids", []) or []:
-            if ref not in evidence_ids:
+            # A claim may cite this pass's inline evidence OR an evidence id
+            # already materialized this round by the repo adapter (designer
+            # query pass). We can't see disk here, so accept any well-formed
+            # ev id not in the inline set; Verifier A (cite-resolution) is the
+            # authority that every cite resolves to a real evidence/ev-*.md.
+            if ref not in evidence_ids and not _EV_ID_RE.match(ref or ""):
                 raise ValueError(
-                    f"designer.json claim {c.get('id')} cites {ref!r} not in "
-                    "this round's evidence")
+                    f"designer.json claim {c.get('id')} cites {ref!r} which is "
+                    "neither this pass's evidence nor a valid ev-NNNNNN id")
 
 
 def validate_reviewer_json(d: dict) -> None:
@@ -173,6 +179,37 @@ def validate_seed_judge_json(d: dict) -> None:
             raise ValueError(
                 f"seed_judge.json {key} must be a float in [0,1], got {v!r}"
             )
+
+
+def validate_designer_query_json(d: dict) -> None:
+    """Designer repo-query pass: emits the repo questions to resolve before
+    authoring. repo_queries may be empty (the designer needs nothing new)."""
+    for key in ("round", "variant", "repo_queries"):
+        if key not in d:
+            raise ValueError(f"designer_query.json missing {key!r}")
+    if not isinstance(d["repo_queries"], list):
+        raise ValueError("designer_query.json repo_queries must be a list")
+    for q in d["repo_queries"]:
+        if not isinstance(q, dict):
+            raise ValueError("designer_query.json repo_query must be an object")
+        if not isinstance(q.get("question"), str) or not q["question"].strip():
+            raise ValueError(
+                "designer_query.json repo_query missing non-empty 'question'")
+
+
+def validate_repo_adapter_json(d: dict) -> None:
+    """Repo adapter: returns one Evidence-shaped record for a query."""
+    for key in ("confidence", "citations", "claim", "excerpt"):
+        if key not in d:
+            raise ValueError(f"repo_adapter.json missing {key!r}")
+    if d["confidence"] not in ("high", "medium", "low"):
+        raise ValueError(
+            f"repo_adapter.json confidence must be high|medium|low, "
+            f"got {d['confidence']!r}")
+    if not isinstance(d["citations"], list):
+        raise ValueError("repo_adapter.json citations must be a list")
+    if not isinstance(d["excerpt"], str) or not d["excerpt"].strip():
+        raise ValueError("repo_adapter.json excerpt must be a non-empty string")
 
 
 # ----- Helpers --------------------------------------------------------------
@@ -325,6 +362,28 @@ SEED_JUDGE_PROMPT = (
     "0.0 for absent. Output ONLY valid JSON."
 )
 
+DESIGNER_QUERY_PROMPT = (
+    "You are the designer, in the repo-query pass. Before authoring, decide "
+    "what you need to learn from the codebase under repo/. Read the CONTEXT.md "
+    "above (goal, current doc, planner intent, existing evidence) and emit JSON "
+    "with fields: round, variant, repo_queries (list of {id, question}). Each "
+    "question must be a single focused, answerable fact about the repo that "
+    "will ground a claim you intend to make. Ask nothing the existing evidence "
+    "already answers. Emit an empty repo_queries list if you need nothing new. "
+    "Output ONLY valid JSON."
+)
+
+REPO_ADAPTER_PROMPT = (
+    "You are the repo adapter. A read-only copy of the codebase is at repo/. "
+    "Answer the QUERY in the CONTEXT.md above by reading the actual files. "
+    "Emit JSON with fields: confidence (high|medium|low), citations (list of "
+    "{source, ref, lines, sha}), claim (one-sentence answer), excerpt (a "
+    "VERBATIM span copied from a real file — never paraphrased). Set "
+    "citations[].ref to the file path (with line range) the excerpt came from. "
+    "If the repo does not answer the query, return confidence \"low\" and say "
+    "so in claim rather than inventing. Output ONLY valid JSON."
+)
+
 
 _CLAIM_SEQ_RE = re.compile(r"^cl-(\d{6})$")
 
@@ -442,6 +501,157 @@ def _assign_evidence_ids(workspace_root: Path, parsed: dict) -> None:
             ev_id = f"ev-{m.group(1)}"
             return f"[^{remap[ev_id]}]" if ev_id in remap else m.group(0)
         parsed["patch_diff"] = _CITE_RE.sub(_sub, patch)
+
+
+# ----- Repo adapter (designer-issued repo queries) ----------------------------
+
+
+def _repo_head_sha(workspace_root: Path) -> str | None:
+    """HEAD sha of the user-provided repo/ if it is a git repo, else None.
+    The repo is read as-is (no harness-managed worktree); the sha is recorded
+    for the audit trail and keys the query cache so it invalidates when the
+    user swaps in a different repo state."""
+    repo = workspace_root / "repo"
+    if not repo.exists():
+        return None
+    r = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _question_hash(question: str) -> str:
+    return hashlib.sha256(question.strip().encode("utf-8")).hexdigest()[:16]
+
+
+def _repo_cache_path(workspace_root: Path) -> Path:
+    # derived/ is gitignored: the cache is a local, rebuildable accelerator,
+    # not part of the committed ledger.
+    return workspace_root / "derived" / "repo_query_cache.json"
+
+
+def _load_repo_cache(workspace_root: Path) -> dict:
+    p = _repo_cache_path(workspace_root)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_repo_cache(workspace_root: Path, cache: dict) -> None:
+    p = _repo_cache_path(workspace_root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cache, indent=2, sort_keys=True))
+
+
+def _materialize_adapter_evidence(
+    workspace_root: Path, repo_sha: str | None, parsed: dict,
+) -> tuple[str, Path, str]:
+    """Write one evidence/ev-*.md from a repo adapter's Evidence JSON, assigning
+    the next global ev id. Returns (ev_id, abs_path, rel_path). Raises
+    RuntimeError if the id collides on disk (append-only invariant)."""
+    ev_id = f"ev-{_max_existing_evidence_seq(workspace_root) + 1:06d}"
+    evidence_dir = workspace_root / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    ev_path = evidence_dir / f"{ev_id}.md"
+    if ev_path.exists():
+        raise RuntimeError(
+            f"adapter evidence id {ev_id!r} already exists on disk")
+    # First citation ref (if any) + repo_sha go into the frontmatter for audit;
+    # the verbatim excerpt is the body (Verifier B matches the doc quote to it).
+    citations = parsed.get("citations") or []
+    ref = ""
+    if citations and isinstance(citations[0], dict):
+        ref = str(citations[0].get("ref", ""))
+    fm = {
+        "id": ev_id,
+        "confidence": str(parsed.get("confidence", "")),
+        "source": "repo",
+        "ref": ref,
+        "repo_sha": repo_sha or "",
+        "claim": str(parsed.get("claim", "")),
+    }
+    fm_lines = [f'{k} = "{_toml_basic_str_escape(v)}"'
+                for k, v in fm.items() if v != ""]
+    text = ("+++\n" + "\n".join(fm_lines) + "\n+++\n\n"
+            + str(parsed.get("excerpt", "")) + "\n")
+    ev_path.write_text(text)
+    return ev_id, ev_path, f"evidence/{ev_id}.md"
+
+
+def resolve_repo_queries(
+    workspace_root: Path,
+    harness_config: dict,
+    round_id: str,
+    variant_id: str,
+    queries: list[dict],
+) -> tuple[list[Path], list[str], dict]:
+    """Resolve designer repo queries into materialized evidence/ev-*.md via the
+    repo adapter, with (repo_sha, question_hash) caching.
+
+    Returns (materialized_abs_paths, evidence_rel_paths, query_id -> ev_id).
+    Degrades gracefully: a query whose adapter spawn fails or returns a non-ok
+    verdict is skipped (logged), never aborting the round — repo grounding is
+    best-effort enrichment, not a gate."""
+    models = harness_config.get("models", {})
+    if "repo_adapter" not in models:
+        # Fall back to the designer model (closest analogue); skip if neither.
+        if "designer" not in models:
+            _log(workspace_root, "repo_query_skip",
+                 detail="no repo_adapter or designer model configured")
+            return [], [], {}
+        harness_config = {**harness_config,
+                          "models": {**models,
+                                     "repo_adapter": models["designer"]}}
+    repo_sha = _repo_head_sha(workspace_root)
+    cache = _load_repo_cache(workspace_root)
+    materialized: list[Path] = []
+    evidence_paths: list[str] = []
+    resolved: dict[str, str] = {}
+    for q in queries:
+        question = (q.get("question") or "").strip()
+        if not question:
+            continue
+        qid = str(q.get("id") or _question_hash(question))
+        cache_key = f"{repo_sha or 'nosha'}:{_question_hash(question)}"
+        cached_ev = cache.get(cache_key)
+        if cached_ev and (workspace_root / "evidence"
+                          / f"{cached_ev}.md").exists():
+            resolved[qid] = cached_ev
+            _log(workspace_root, "repo_query_cache_hit",
+                 round_id=round_id, query_id=qid, ev_id=cached_ev)
+            continue
+        ctx = context_mod.build_repo_adapter_context(
+            workspace_root, round_id, variant_id, question)
+        result = spawn_role(
+            role="repo_adapter", harness_config=harness_config,
+            context_md=ctx, prompt=REPO_ADAPTER_PROMPT,
+            workspace_root=workspace_root, round_id=round_id,
+            variant_id=variant_id, validator=validate_repo_adapter_json)
+        if result.verdict != "ok":
+            _log(workspace_root, "repo_query_skip",
+                 round_id=round_id, query_id=qid, verdict=result.verdict,
+                 detail=result.stderr_tail or result.verdict)
+            continue
+        try:
+            ev_id, ev_abs, ev_rel = _materialize_adapter_evidence(
+                workspace_root, repo_sha, result.parsed)
+        except RuntimeError as e:
+            _log(workspace_root, "repo_query_skip",
+                 round_id=round_id, query_id=qid, detail=str(e))
+            continue
+        materialized.append(ev_abs)
+        evidence_paths.append(ev_rel)
+        resolved[qid] = ev_id
+        cache[cache_key] = ev_id
+        _log(workspace_root, "repo_query_resolved",
+             round_id=round_id, query_id=qid, ev_id=ev_id,
+             confidence=result.parsed.get("confidence"))
+    _save_repo_cache(workspace_root, cache)
+    return materialized, evidence_paths, resolved
 
 
 def _materialize_designer_output(
@@ -752,6 +962,44 @@ def run_round(
          retry_count=planner_result.retry_count,
          elapsed_seconds=planner_result.elapsed_seconds)
 
+    # ---- Phase 2a: Designer repo-query pass + repo resolve ----
+    # Only when a user-provided repo/ is present. The designer names the repo
+    # facts it needs; the repo adapter resolves each into evidence/ev-*.md that
+    # the author pass cites. Entirely best-effort: a failed query pass or a
+    # failed adapter spawn degrades to "no extra evidence", never aborting the
+    # round (repo grounding is enrichment, not a gate).
+    repo_evidence_paths: list[str] = []
+    repo_materialized: list[Path] = []
+    if (workspace_root / "repo").exists():
+        dq_ctx = context_mod.build_designer_query_context(
+            workspace_root, round_id, variant_id)
+        dq_result = spawn_role(
+            role="designer", harness_config=harness_config,
+            context_md=dq_ctx, prompt=DESIGNER_QUERY_PROMPT,
+            workspace_root=workspace_root, round_id=round_id,
+            variant_id=variant_id, validator=validate_designer_query_json)
+        if dq_result.verdict != "ok":
+            _log(workspace_root, "designer_query_skip", round_id=round_id,
+                 verdict=dq_result.verdict,
+                 detail=dq_result.stderr_tail or dq_result.verdict)
+        else:
+            spawn_counts["designer_query"] = 1 + dq_result.retry_count
+            round_ledger.write_role_scratch(
+                workspace_root, round_id, "designer_query", dq_result.parsed)
+            queries = dq_result.parsed.get("repo_queries", []) or []
+            if queries:
+                repo_materialized, repo_evidence_paths, _resolved = \
+                    resolve_repo_queries(
+                        workspace_root, harness_config, round_id, variant_id,
+                        queries)
+                # Track for rollback now; re-attached after the designer
+                # materialize rebinds `materialized` below.
+                materialized.extend(repo_materialized)
+                spawn_counts["repo_adapter"] = len(queries)
+                _log(workspace_root, "repo_resolve_complete",
+                     round_id=round_id, requested=len(queries),
+                     resolved=len(repo_evidence_paths))
+
     # ---- Phase 2: Designer ----
     designer_ctx = context_mod.build_designer_context(
         workspace_root, round_id, variant_id,
@@ -807,6 +1055,11 @@ def run_round(
             failed_phase="designer",
             detail=f"materialize failure: {e}",
         )
+    # _materialize_designer_output rebinds `materialized` to its own list; re-add
+    # the repo-adapter evidence from Phase 2a so it is both rolled back on a
+    # later reject and committed (via evidence_paths) on merge.
+    materialized.extend(repo_materialized)
+    evidence_paths = evidence_paths + repo_evidence_paths
     _log(workspace_root, "materialize",
          round_id=round_id,
          evidence_count=len(evidence_paths),

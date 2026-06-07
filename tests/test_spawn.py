@@ -137,7 +137,7 @@ class _PatchedDispatch:
 
     def __enter__(self):
         self._saved = dict(spawn._TOOL_INVOKERS)
-        def _fake_claude(model):
+        def _fake_claude(model, cfg=None):
             return [sys.executable, FAKE_CLI, *self.extras]
         spawn._TOOL_INVOKERS["claude"] = _fake_claude
         return self
@@ -445,7 +445,7 @@ class SpawnRoleToolDispatchTest(unittest.TestCase):
         # Patch invoker to point at a nonexistent binary
         saved = dict(spawn._TOOL_INVOKERS)
         try:
-            spawn._TOOL_INVOKERS["claude"] = lambda m: ["/nonexistent/binary-xyz"]
+            spawn._TOOL_INVOKERS["claude"] = lambda m, cfg=None: ["/nonexistent/binary-xyz"]
             result = spawn.spawn_role(
                 role="planner", harness_config=cfg,
                 context_md="", prompt="",
@@ -464,6 +464,66 @@ class SpawnRoleToolDispatchTest(unittest.TestCase):
             argv = spawn._TOOL_INVOKERS[name]("my-specific-model")
             self.assertIn("my-specific-model", argv,
                           f"{name} invoker did not include model in argv")
+
+    def test_claude_no_tool_flags_without_config(self):
+        argv = spawn._invoke_claude("m", {})
+        for flag in ("--allowedTools", "--mcp-config", "--permission-mode"):
+            self.assertNotIn(flag, argv)
+
+    def test_claude_builds_mcp_and_tool_flags(self):
+        argv = spawn._invoke_claude("m", {
+            "allowed_tools": ["Read", "Bash(gh:*)", "mcp__gdrive"],
+            "mcp_config": [".mcp.json"],
+            "strict_mcp_config": True,
+            "permission_mode": "acceptEdits",
+        })
+        self.assertIn("--mcp-config", argv)
+        self.assertIn(".mcp.json", argv)
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertIn("--allowedTools", argv)
+        self.assertIn("Bash(gh:*)", argv)
+        self.assertIn("mcp__gdrive", argv)
+        self.assertIn("--permission-mode", argv)
+        self.assertIn("acceptEdits", argv)
+
+    def test_claude_mcp_config_accepts_scalar_string(self):
+        argv = spawn._invoke_claude("m", {"mcp_config": ".mcp.json"})
+        self.assertEqual(argv[argv.index("--mcp-config") + 1], ".mcp.json")
+
+    def test_codex_does_not_emit_mcp_config_flag(self):
+        # codex has no .mcp.json; mcp_config must be ignored, not passed through.
+        argv = spawn._invoke_codex("m", {"mcp_config": [".mcp.json"],
+                                         "sandbox": "read-only",
+                                         "extra_args": ["-c", "x=1"]})
+        self.assertNotIn("--mcp-config", argv)
+        self.assertNotIn(".mcp.json", argv)
+        self.assertIn("--sandbox", argv)
+        self.assertIn("read-only", argv)
+        self.assertEqual(argv[-2:], ["-c", "x=1"])
+
+    def test_gemini_maps_mcp_server_names_and_approval(self):
+        argv = spawn._invoke_gemini("m", {
+            "mcp_server_names": ["gdrive", "glean"],
+            "approval_mode": "yolo",
+        })
+        self.assertIn("--allowed-mcp-server-names", argv)
+        self.assertIn("gdrive", argv)
+        self.assertIn("--approval-mode", argv)
+        self.assertNotIn("--mcp-config", argv)
+
+    def test_effective_cfg_drops_missing_mcp_files(self):
+        # A configured .mcp.json that doesn't exist is filtered out so claude
+        # --mcp-config never points at a missing file.
+        cfg = {"mcp_config": [".mcp.json", "present.json"]}
+        (self.td / "present.json").write_text("{}")
+        eff = spawn._effective_tool_cfg(cfg, self.td)
+        self.assertEqual(eff["mcp_config"], ["present.json"])
+
+    def test_effective_cfg_unchanged_when_all_present(self):
+        cfg = {"mcp_config": ["a.json"], "allowed_tools": ["Read"]}
+        (self.td / "a.json").write_text("{}")
+        eff = spawn._effective_tool_cfg(cfg, self.td)
+        self.assertIs(eff, cfg)  # no copy when nothing filtered
 
 
 class SpawnRoleConfigTest(unittest.TestCase):

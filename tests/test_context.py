@@ -86,9 +86,22 @@ class BuildPlannerContextTest(unittest.TestCase):
     def setUp(self):
         self.td = Path(tempfile.mkdtemp())
         _write_goal_toml(self.td)
+        _write_constitution(self.td)
 
     def tearDown(self):
         shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_planner_includes_constitution(self):
+        _write_decisions(self.td, {})
+        out = context.build_planner_context(self.td, "round-000001", "v-001")
+        self.assertIn("Slug discipline", out)
+        self.assertIn("Other section", out)
+
+    def test_planner_omits_constitution_section_when_absent(self):
+        (self.td / "constitution.md").unlink()
+        _write_decisions(self.td, {})
+        out = context.build_planner_context(self.td, "round-000001", "v-001")
+        self.assertNotIn("Slug discipline", out)
 
     def test_planner_lists_only_open_and_proposed_decisions(self):
         _write_decisions(self.td, {
@@ -191,6 +204,13 @@ class BuildReviewerContextTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.td, ignore_errors=True)
 
+    def test_reviewer_includes_constitution(self):
+        _write_constitution(self.td)
+        _write_decisions(self.td, {})
+        out = context.build_reviewer_context(self.td, "round-000001", "v-001")
+        self.assertIn("Slug discipline", out)
+        self.assertIn("Other section", out)
+
     def test_reviewer_shows_positions_across_all_variants(self):
         _write_decisions(self.td, {
             "retry-policy": {"id": "retry-policy", "question": "?",
@@ -286,11 +306,19 @@ class BuildVerifierCContextTest(unittest.TestCase):
     def test_verifier_c_omits_designer_and_reviewer_specific_sections(self):
         _write_decisions(self.td, {})
         out = context.build_verifier_c_context(self.td, "round-000001", "v-001")
-        # Should NOT contain any of the designer-/reviewer-only sections
-        self.assertNotIn("Slug discipline", out)
+        # Should NOT contain the designer-/reviewer-only RENDERED sections.
+        # (Slug discipline is no longer designer-specific — it lives in the
+        # shared constitution that every role now receives.)
         self.assertNotIn("Positions you have committed", out)
         self.assertNotIn("All positions in use across variants", out)
         self.assertNotIn("registry_size", out)
+
+    def test_verifier_c_includes_constitution(self):
+        _write_constitution(self.td)
+        _write_decisions(self.td, {})
+        out = context.build_verifier_c_context(self.td, "round-000001", "v-001")
+        self.assertIn("Slug discipline", out)
+        self.assertIn("Other section", out)
 
     def test_verifier_c_header_includes_round_and_variant_and_goal_version(self):
         _write_decisions(self.td, {})
