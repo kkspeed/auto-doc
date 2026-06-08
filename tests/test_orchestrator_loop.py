@@ -248,6 +248,26 @@ class RunLoopBootstrapTest(unittest.TestCase):
         with self.assertRaises(bootstrap.DirtyWorktreeError):
             orchestrator.run_loop(self.ws, _harness_config(), max_rounds=1)
 
+    def test_recovers_from_leaked_ledger_file(self):
+        # The reported failure mode: a previous round left an uncommitted doc
+        # section in the worktree (e.g. an LLM spawn wrote it directly). The run
+        # must recover and proceed, not abort with DirtyWorktreeError.
+        stray = (self.ws / "variants" / "nodes" / "v-001" / "doc"
+                 / "02-six-week-compression.md")
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_text("leaked, never committed\n")
+
+        def fake_run_round(workspace_root, harness_config, round_id, variant_id):
+            return orchestrator.RoundOutcome(
+                round_id=round_id, variant_id=variant_id,
+                verdict="spawn-failed", elapsed_seconds=0.01)
+        with mock.patch("harness.orchestrator.run_round",
+                        side_effect=fake_run_round):
+            outcomes = orchestrator.run_loop(
+                self.ws, _harness_config(), max_rounds=1, variant_count=2)
+        self.assertEqual(len(outcomes), 1)
+        self.assertFalse(stray.exists())
+
     def test_merge_round_rebuilds_decision_cache(self):
         # Append a new decision to goal.toml, then a merged round must refresh
         # derived/decisions.json to include it.

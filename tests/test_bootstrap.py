@@ -137,6 +137,92 @@ class AssertCleanWorktreeTest(unittest.TestCase):
             bootstrap.assert_clean_worktree(nongit)
 
 
+class RecoverWorktreeTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        subprocess.check_call(["git", "init", "-q"], cwd=self.td)
+        # A committed ledger file so we can exercise the modify/restore path.
+        doc = self.td / "variants" / "nodes" / "v-001" / "doc"
+        doc.mkdir(parents=True)
+        (doc / "00-overview.md").write_text("committed\n")
+        (self.td / "goal.toml").write_text('goal_version = "g-01"\n')
+        subprocess.check_call(["git", "-C", str(self.td), "add", "."])
+        subprocess.check_call(
+            ["git", "-C", str(self.td), "-c", "user.email=h@l",
+             "-c", "user.name=h", "commit", "-q", "-m", "init"])
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _status(self):
+        return subprocess.run(
+            ["git", "-C", str(self.td), "status", "--porcelain"],
+            capture_output=True, text=True).stdout.strip()
+
+    def test_clean_returns_empty(self):
+        self.assertEqual(bootstrap.recover_worktree(self.td), [])
+
+    def test_untracked_ledger_file_discarded(self):
+        stray = (self.td / "variants" / "nodes" / "v-001" / "doc"
+                 / "02-six-week-compression.md")
+        stray.write_text("leaked by an llm spawn\n")
+        discarded = bootstrap.recover_worktree(self.td)
+        self.assertIn(
+            "variants/nodes/v-001/doc/02-six-week-compression.md", discarded)
+        self.assertFalse(stray.exists())
+        self.assertEqual(self._status(), "")
+
+    def test_untracked_ledger_dir_discarded(self):
+        new = self.td / "variants" / "nodes" / "v-003" / "doc"
+        new.mkdir(parents=True)
+        (new / "00-overview.md").write_text("whole new variant tree\n")
+        bootstrap.recover_worktree(self.td)
+        self.assertFalse((self.td / "variants" / "nodes" / "v-003").exists())
+        self.assertEqual(self._status(), "")
+
+    def test_modified_ledger_file_restored(self):
+        f = self.td / "variants" / "nodes" / "v-001" / "doc" / "00-overview.md"
+        f.write_text("clobbered\n")
+        bootstrap.recover_worktree(self.td)
+        self.assertEqual(f.read_text(), "committed\n")
+        self.assertEqual(self._status(), "")
+
+    def test_staged_ledger_file_restored(self):
+        f = self.td / "variants" / "nodes" / "v-001" / "doc" / "00-overview.md"
+        f.write_text("clobbered\n")
+        subprocess.check_call(["git", "-C", str(self.td), "add", str(f)])
+        bootstrap.recover_worktree(self.td)
+        self.assertEqual(f.read_text(), "committed\n")
+        self.assertEqual(self._status(), "")
+
+    def test_actions_jsonl_discarded(self):
+        (self.td / "actions.jsonl").write_text('{"event":"x"}\n')
+        bootstrap.recover_worktree(self.td)
+        self.assertFalse((self.td / "actions.jsonl").exists())
+
+    def test_foreign_file_raises_and_preserves_everything(self):
+        (self.td / "stray.txt").write_text("operator file")
+        ledger_stray = (self.td / "evidence")
+        ledger_stray.mkdir()
+        (ledger_stray / "ev-000001.md").write_text("x")
+        with self.assertRaises(bootstrap.DirtyWorktreeError):
+            bootstrap.recover_worktree(self.td)
+        # Refuses to touch ANYTHING when operator-owned dirt is present.
+        self.assertTrue((self.td / "stray.txt").exists())
+        self.assertTrue((ledger_stray / "ev-000001.md").exists())
+
+    def test_modified_config_raises(self):
+        (self.td / "goal.toml").write_text('goal_version = "g-02"\n')
+        with self.assertRaises(bootstrap.DirtyWorktreeError):
+            bootstrap.recover_worktree(self.td)
+
+    def test_non_git_dir_raises(self):
+        nongit = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, nongit, ignore_errors=True)
+        with self.assertRaises(bootstrap.DirtyWorktreeError):
+            bootstrap.recover_worktree(nongit)
+
+
 class SeedVariantDocsTest(unittest.TestCase):
     def setUp(self):
         self.td = Path(tempfile.mkdtemp())

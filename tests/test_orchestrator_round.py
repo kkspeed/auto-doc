@@ -1053,6 +1053,71 @@ class PromptReadInstructionTest(unittest.TestCase):
             self.assertIn("Read these first", p)
 
 
+class RunRoundSignalGuardTest(unittest.TestCase):
+    """The run_round wrapper installs best-effort SIGTERM/SIGINT cleanup so a
+    graceful kill mid-round discards in-flight uncommitted ledger files instead
+    of orphaning them, then restores the prior handlers."""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+        _commit_setup(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_installs_during_and_restores_after(self):
+        import signal
+        orig = {s: signal.getsignal(s)
+                for s in (signal.SIGTERM, signal.SIGINT)}
+        seen = {}
+
+        def fake_impl(ws, cfg, rid, vid):
+            seen[signal.SIGTERM] = signal.getsignal(signal.SIGTERM)
+            seen[signal.SIGINT] = signal.getsignal(signal.SIGINT)
+            return orchestrator.RoundOutcome(
+                round_id=rid, variant_id=vid, verdict="merge")
+
+        with mock.patch("harness.orchestrator._run_round_impl",
+                        side_effect=fake_impl):
+            orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        # A handler was installed while the round ran...
+        self.assertNotEqual(seen[signal.SIGTERM], orig[signal.SIGTERM])
+        self.assertNotEqual(seen[signal.SIGINT], orig[signal.SIGINT])
+        # ...and the originals were restored afterward.
+        self.assertEqual(signal.getsignal(signal.SIGTERM),
+                         orig[signal.SIGTERM])
+        self.assertEqual(signal.getsignal(signal.SIGINT),
+                         orig[signal.SIGINT])
+
+    def test_sigterm_mid_round_discards_in_flight_section(self):
+        import signal
+        stray = (self.ws / "variants" / "nodes" / "v-001" / "doc"
+                 / "99-in-flight.md")
+
+        def fake_impl(ws, cfg, rid, vid):
+            # Emulate the vulnerable window: a section is on disk (git-applied)
+            # but not yet committed when a graceful kill arrives.
+            stray.parent.mkdir(parents=True, exist_ok=True)
+            stray.write_text("applied, not yet committed\n")
+            signal.raise_signal(signal.SIGTERM)
+            return orchestrator.RoundOutcome(
+                round_id=rid, variant_id=vid, verdict="merge")
+
+        # Neutralize only the handler's RE-RAISE (orchestrator.os.kill) so the
+        # test process survives; signal.raise_signal still delivers for real, so
+        # the handler genuinely runs and performs the discard.
+        with mock.patch("harness.orchestrator._run_round_impl",
+                        side_effect=fake_impl), \
+                mock.patch.object(orchestrator.os, "kill") as kill_mock:
+            orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertFalse(stray.exists())
+        self.assertTrue(kill_mock.called)  # handler attempted to re-raise
+
+
 class MaterializeFailLoudTest(unittest.TestCase):
     def setUp(self):
         self.td = Path(tempfile.mkdtemp())

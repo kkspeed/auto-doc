@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tomllib
 from pathlib import Path
@@ -69,6 +70,109 @@ def assert_clean_worktree(workspace_root: Path) -> None:
         raise DirtyWorktreeError(
             "workspace has uncommitted changes — commit or discard before "
             f"running:\n{out.stdout.rstrip()}")
+
+
+# Paths the harness itself owns and writes through the round loop. Anything
+# uncommitted under these is, by definition, NOT part of the durable
+# append-only ledger (which is built exclusively from commits) — it is a leaked
+# artifact (an LLM spawn writing directly to its cwd=workspace_root, a round
+# interrupted between `git apply` and its commit, a partial materialize) and is
+# always safe to discard back to HEAD. Everything else (goal.toml, harness.toml,
+# constitution.md, seed_doc.md, .mcp.json, anything unrecognized) is treated as
+# operator-owned and is NEVER auto-discarded.
+_LEDGER_DIR_PREFIXES = (
+    "variants/", "evidence/", "rejections/", "rounds/", "derived/",
+)
+_LEDGER_FILES = ("actions.jsonl", "morning_brief.md", "CONTEXT.md")
+
+
+def _is_ledger_owned(rel: str) -> bool:
+    rel = rel.rstrip("/")
+    return (rel in _LEDGER_FILES
+            or any((rel + "/").startswith(p) for p in _LEDGER_DIR_PREFIXES))
+
+
+def _parse_porcelain_z(raw: str) -> list[tuple[str, str]]:
+    """Parse `git status --porcelain -z` into (xy, path) records. Rename/copy
+    records carry a trailing NUL-separated source path which we consume and
+    ignore (the destination path is what the worktree now holds)."""
+    fields = raw.split("\0")
+    entries: list[tuple[str, str]] = []
+    i = 0
+    while i < len(fields):
+        f = fields[i]
+        if not f:
+            i += 1
+            continue
+        xy, path = f[:2], f[3:]
+        entries.append((xy, path))
+        # R (rename) / C (copy) in either index or worktree slot → src follows.
+        if "R" in xy or "C" in xy:
+            i += 2
+        else:
+            i += 1
+    return entries
+
+
+def recover_worktree(workspace_root: Path) -> list[str]:
+    """Restore a clean worktree by discarding uncommitted changes under the
+    harness-owned ledger paths, then return the sorted list of paths discarded.
+
+    This is the recoverable replacement for assert_clean_worktree at run/round
+    start. Leaked ledger artifacts (see _is_ledger_owned) are reset to HEAD so a
+    stray file from a previous round or an interrupted run can never abort the
+    next round. If git status cannot be determined, or if any uncommitted change
+    is OUTSIDE the ledger (operator-owned config, or an unrecognized path), this
+    raises DirtyWorktreeError unchanged — auto-clobbering an operator's edits
+    would be worse than aborting, and a non-git path must never look clean."""
+    out = subprocess.run(
+        ["git", "-C", str(workspace_root), "-c", "core.quotePath=false",
+         "status", "--porcelain", "-z"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        raise DirtyWorktreeError(
+            f"cannot determine worktree status for {workspace_root}: "
+            f"{out.stderr.strip() or 'git status failed'}")
+    entries = _parse_porcelain_z(out.stdout)
+    if not entries:
+        return []
+
+    ledger = [(xy, p) for xy, p in entries if _is_ledger_owned(p)]
+    foreign = [(xy, p) for xy, p in entries if not _is_ledger_owned(p)]
+    if foreign:
+        listing = "\n".join(f"{xy} {p}" for xy, p in foreign)
+        raise DirtyWorktreeError(
+            "workspace has uncommitted changes outside the harness ledger — "
+            f"commit or discard before running:\n{listing}")
+
+    discarded: list[str] = []
+    for _xy, path in ledger:
+        # Unstage first so a path staged by an interrupted commit is handled
+        # uniformly with an unstaged one.
+        subprocess.run(
+            ["git", "-C", str(workspace_root), "reset", "-q", "--", path],
+            capture_output=True, text=True)
+        in_head = subprocess.run(
+            ["git", "-C", str(workspace_root), "cat-file", "-e",
+             f"HEAD:{path}"], capture_output=True, text=True).returncode == 0
+        if in_head:
+            # Tracked at HEAD → restore committed content (covers modify/delete).
+            subprocess.run(
+                ["git", "-C", str(workspace_root), "checkout", "-q", "HEAD",
+                 "--", path], capture_output=True, text=True)
+        else:
+            # Not in HEAD → a new leaked file/dir → remove it.
+            target = workspace_root / path.rstrip("/")
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                try:
+                    target.unlink()
+                except FileNotFoundError:
+                    pass
+        discarded.append(path)
+    return sorted(discarded)
 
 
 def seed_variant_docs(workspace_root: Path, variant_count: int) -> list[str]:

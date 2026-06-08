@@ -15,8 +15,12 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
 import re
+import signal
 import subprocess
+import sys
+import threading
 import time
 import tomllib
 from dataclasses import dataclass, field
@@ -865,12 +869,75 @@ def run_round(
     round_id: str,
     variant_id: str,
 ) -> RoundOutcome:
+    """Execute one round, wrapped in a best-effort SIGTERM/SIGINT cleanup guard.
+
+    The round materializes a doc section to disk (via `git apply`) well before
+    it commits — the reviewer and verifier-C spawns run in between, a multi-
+    minute window. A kill landing there would orphan the applied section in the
+    worktree. This wrapper installs handlers for the two *catchable* kill signals
+    (SIGTERM from a wrapper/`kill`, SIGINT from Ctrl-C) that discard any
+    uncommitted ledger dirt before re-raising, so a graceful shutdown leaves a
+    clean tree. SIGKILL is uncatchable; the start-of-round recover_worktree
+    remains the backstop for that and for anything this misses.
+
+    Handlers are installed only from the main thread (a Python constraint) and
+    restored in `finally` so they never leak across rounds or into tests."""
+    prev_handlers: dict = {}
+
+    def _interrupt_cleanup(signum, _frame):
+        # Best-effort: discard in-flight uncommitted ledger files. recover_
+        # worktree raises on operator-owned dirt — swallow it (a signal handler
+        # must not raise, and refusing to clobber operator edits is correct).
+        try:
+            bootstrap.recover_worktree(workspace_root)
+        except Exception:
+            pass
+        # Restore the prior disposition and re-raise so normal signal-exit
+        # semantics (and any outer handler) still apply.
+        try:
+            signal.signal(signum, prev_handlers.get(signum, signal.SIG_DFL))
+        except (ValueError, OSError):
+            pass
+        os.kill(os.getpid(), signum)
+
+    can_handle = threading.current_thread() is threading.main_thread()
+    if can_handle:
+        for _sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                prev_handlers[_sig] = signal.signal(_sig, _interrupt_cleanup)
+            except (ValueError, OSError):
+                pass
+    try:
+        return _run_round_impl(
+            workspace_root, harness_config, round_id, variant_id)
+    finally:
+        for _sig, _handler in prev_handlers.items():
+            try:
+                signal.signal(_sig, _handler)
+            except (ValueError, OSError):
+                pass
+
+
+def _run_round_impl(
+    workspace_root: Path,
+    harness_config: dict,
+    round_id: str,
+    variant_id: str,
+) -> RoundOutcome:
     """Execute one round on one variant. Linear flow with early returns
     on rejection paths. See spec §3.1 for full phase semantics."""
     start_ts = time.monotonic()
     spawn_counts: dict[str, int] = {}
     materialized: list[Path] = []
-    bootstrap.assert_clean_worktree(workspace_root)
+    # Recover, don't abort. A previous round (or an interrupted run, or an LLM
+    # spawn writing directly to its cwd=workspace_root) can leave uncommitted
+    # ledger artifacts behind; those are never part of the durable commit ledger
+    # and are discarded here so a stray file can't abort this round. Operator
+    # edits outside the ledger still raise DirtyWorktreeError.
+    recovered = bootstrap.recover_worktree(workspace_root)
+    if recovered:
+        _log(workspace_root, "worktree_recovered",
+             round_id=round_id, variant_id=variant_id, discarded=recovered)
     round_start_sha = subprocess.check_output(
         ["git", "-C", str(workspace_root), "rev-parse", "HEAD"],
         text=True).strip()
@@ -1632,7 +1699,16 @@ def run_loop(
             "max_wall_clock_hours"
         )
 
-    bootstrap.assert_clean_worktree(workspace_root)
+    # Recover the worktree before bootstrapping. A run killed mid-round (or one
+    # whose last spawn wrote directly to the workspace) leaves uncommitted
+    # ledger artifacts behind; discard them so seeding/bootstrap start clean
+    # instead of aborting. Surfaced on stderr — the durable per-round audit line
+    # is emitted by run_round, whose own start-of-round recovery would otherwise
+    # roll back an actions.jsonl entry written here before the first commit.
+    recovered = bootstrap.recover_worktree(workspace_root)
+    if recovered:
+        print(f"harness: recovered worktree, discarded {len(recovered)} "
+              f"stray ledger path(s): {', '.join(recovered)}", file=sys.stderr)
     bootstrap.rebuild_decisions_cache(workspace_root)
     bootstrap.ensure_empty_registry(workspace_root)
     # Rebuild the derived decision cache, ensure the registry baseline, and
