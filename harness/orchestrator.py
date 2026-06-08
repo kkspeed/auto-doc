@@ -86,11 +86,12 @@ def validate_planner_json(d: dict) -> None:
 
 
 def validate_designer_json(d: dict) -> None:
-    for key in ("round", "variant", "patch_diff", "evidence", "claims"):
+    # No patch_diff: the designer edits doc section files directly with its
+    # Write/Edit tools; the orchestrator derives the change set from git. The
+    # JSON payload carries only evidence + claims metadata.
+    for key in ("round", "variant", "evidence", "claims"):
         if key not in d:
             raise ValueError(f"designer.json missing {key!r}")
-    if not isinstance(d["patch_diff"], str):
-        raise ValueError("designer.json patch_diff must be a string")
     if not isinstance(d["claims"], list):
         raise ValueError("designer.json claims must be a list")
     if not isinstance(d["evidence"], list):
@@ -384,13 +385,19 @@ PLANNER_PROMPT = (
 )
 
 DESIGNER_PROMPT = (
-    "You are the designer. Read the CONTEXT.md above and emit a SINGLE JSON "
-    "object with fields: round, variant, patch_diff (unified-diff text or empty "
-    "string), evidence (list), claims (list). "
-    "patch_diff MUST be a standard `git diff` unified diff that uses `a/` and "
-    "`b/` path prefixes, and it may ONLY create or modify section files under "
-    "variants/nodes/<variant>/doc/ for THIS variant — any hunk touching a path "
-    "outside that directory rejects the whole round. "
+    "You are the designer. Read the CONTEXT.md above, then make your doc edits "
+    "by WRITING FILES DIRECTLY with your Write/Edit tools — do NOT emit a patch "
+    "or diff; the harness derives the patch from git. "
+    "You may ONLY create or modify Markdown section files under "
+    "variants/nodes/<variant>/doc/ for THIS variant (e.g. "
+    "variants/nodes/<variant>/doc/01-my-section.md); editing any other path "
+    "(another variant, evidence/, claims/, goal.toml, repo files) rejects the "
+    "whole round. Each section file MUST begin with a +++ TOML frontmatter fence "
+    "(section_id, tags — include \"decided\" only when the section's claims are "
+    "settled) and put [^ev-NNNNNN] citations inline in the prose, using the SAME "
+    "evidence ids you list below. "
+    "Then emit a SINGLE JSON object (your only stdout) with fields: round, "
+    "variant, evidence (list), claims (list) — NO patch_diff. "
     "Each EVIDENCE item is an object with REQUIRED fields: id (string "
     "'ev-NNNNNN', six digits), confidence (high|medium|low), citations (list), "
     "claim (string), excerpt (string). "
@@ -586,9 +593,13 @@ def _max_existing_evidence_seq(workspace_root: Path) -> int:
     return max_seq
 
 
-def _assign_evidence_ids(workspace_root: Path, parsed: dict) -> None:
-    """Reassign each NEW evidence item a fresh, globally-unique ev-NNNNNN id
-    and remap every in-payload reference to it, mutating parsed in place.
+def _assign_evidence_ids(workspace_root: Path, parsed: dict) -> dict[str, str]:
+    """Reassign each NEW evidence item a fresh, globally-unique ev-NNNNNN id and
+    remap every in-payload reference to it, mutating parsed in place. Returns the
+    {old_id: new_id} remap so the caller can also rewrite the [^ev-*] citations
+    in the doc files the designer wrote (those are remapped in
+    _materialize_designer_output, not here, since the designer authors them on
+    disk rather than in a patch string).
 
     Unlike claim ids, evidence id *format* is already enforced by
     validate_designer_json, so the failure this prevents is COLLISION: the
@@ -596,26 +607,18 @@ def _assign_evidence_ids(workspace_root: Path, parsed: dict) -> None:
     the append-only "already exists" guard at materialize. The orchestrator
     allocates fresh ids above the global max so a collision is impossible.
 
-    Evidence IS cross-referenced, so after reassigning we remap:
-      - claim.evidence_ids — validate_designer_json guarantees every claim ref
-        is in THIS round's evidence set, so all refs are keys in the remap.
-      - [^ev-NNNNNN] citations inside patch_diff doc text.
-    evidence.citations is a {source, ref, lines, sha} list (not ev-id refs) and
-    is not materialized, so it is left untouched.
+    Evidence IS cross-referenced, so after reassigning we remap claim.evidence_ids
+    here (validate_designer_json guarantees every claim ref is in THIS round's
+    evidence set). evidence.citations is a {source, ref, lines, sha} list (not
+    ev-id refs) and is not materialized, so it is left untouched.
 
     Must run BEFORE _assign_claim_ids and the scratch write so the remap reaches
     the scratch copy and the on-disk files. Keyed by the designer's original id,
     which validate_designer_json guarantees is unique within the payload, so
-    even a reordering/swap of ids remaps correctly.
-
-    Known limitation: if the designer both proposes a NEW evidence id that
-    happens to already exist on disk AND cites that same id in patch_diff
-    intending the pre-existing evidence, the citation is remapped to the fresh
-    item. This is contradictory designer intent (the old behaviour hard-failed
-    the round), so converting it to a consistent remap is strictly no worse."""
+    even a reordering/swap of ids remaps correctly."""
     evidence = parsed.get("evidence")
     if not isinstance(evidence, list) or not evidence:
-        return
+        return {}
     next_seq = _max_existing_evidence_seq(workspace_root) + 1
     remap: dict[str, str] = {}
     for ev in evidence:
@@ -628,19 +631,14 @@ def _assign_evidence_ids(workspace_root: Path, parsed: dict) -> None:
         if isinstance(old, str) and old and old != new:
             remap[old] = new
     if not remap:
-        return
+        return {}
     for claim in parsed.get("claims", []) or []:
         if not isinstance(claim, dict):
             continue
         refs = claim.get("evidence_ids")
         if isinstance(refs, list):
             claim["evidence_ids"] = [remap.get(r, r) for r in refs]
-    patch = parsed.get("patch_diff")
-    if isinstance(patch, str) and patch:
-        def _sub(m: "re.Match") -> str:
-            ev_id = f"ev-{m.group(1)}"
-            return f"[^{remap[ev_id]}]" if ev_id in remap else m.group(0)
-        parsed["patch_diff"] = _CITE_RE.sub(_sub, patch)
+    return remap
 
 
 # ----- Repo adapter (designer-issued repo queries) ----------------------------
@@ -794,13 +792,76 @@ def resolve_repo_queries(
     return materialized, evidence_paths, resolved
 
 
+def _designer_changed_paths(workspace_root: Path) -> list[str]:
+    """The set of individual non-ignored files the designer changed in the
+    worktree — untracked (new) plus tracked modifications/staged — as rel-paths.
+
+    Files are listed individually (not collapsed to directories), so a brand-new
+    section in an as-yet-untracked doc dir is still seen. Best-effort: a git
+    failure yields an empty set, leaving the round a no-op rather than crashing.
+    """
+    paths: set[str] = set()
+    for args in (
+        ["ls-files", "--others", "--exclude-standard", "-z"],   # untracked
+        ["diff", "--name-only", "-z"],                          # unstaged mods
+        ["diff", "--cached", "--name-only", "-z"],              # staged
+    ):
+        out = subprocess.run(
+            ["git", "-C", str(workspace_root), "-c", "core.quotePath=false",
+             *args], capture_output=True, text=True)
+        if out.returncode == 0:
+            paths.update(p for p in out.stdout.split("\0") if p)
+    return sorted(paths)
+
+
+def _write_patch_diff_record(
+    workspace_root: Path, round_id: str, section_paths: list[str],
+) -> None:
+    """Write rounds/<round_id>/patch.diff as a git-DERIVED unified diff of the
+    designer's doc edits (gitignored; Reviewer/Verifier-C read it). New files are
+    surfaced via a transient `git add -N` that is immediately undone with
+    `git reset`, so the index is left exactly as it was."""
+    round_dir = workspace_root / "rounds" / round_id
+    round_dir.mkdir(parents=True, exist_ok=True)
+    patch_text = ""
+    if section_paths:
+        subprocess.run(
+            ["git", "-C", str(workspace_root), "add", "-N", "--",
+             *section_paths], capture_output=True, text=True)
+        diff = subprocess.run(
+            ["git", "-C", str(workspace_root), "-c", "core.quotePath=false",
+             "diff", "--", *section_paths], capture_output=True, text=True)
+        patch_text = diff.stdout
+        subprocess.run(
+            ["git", "-C", str(workspace_root), "reset", "-q", "--",
+             *section_paths], capture_output=True, text=True)
+    (round_dir / "patch.diff").write_text(patch_text, encoding="utf-8")
+
+
+def _remap_cites_in_text(text: str, ev_remap: dict[str, str]) -> str:
+    """Rewrite [^ev-NNNNNN] citations per the evidence-id remap."""
+    def _sub(m: "re.Match") -> str:
+        ev_id = f"ev-{m.group(1)}"
+        return f"[^{ev_remap[ev_id]}]" if ev_id in ev_remap else m.group(0)
+    return _CITE_RE.sub(_sub, text)
+
+
 def _materialize_designer_output(
     workspace_root: Path, variant_id: str, round_id: str, parsed: dict,
+    ev_remap: dict[str, str] | None = None,
 ) -> tuple[list[Path], list[str], list[str], list[str], list[str]]:
-    """Materialize designer's parsed output to disk. ATOMIC: if any step
-    raises, every file written by this call is discarded before the exception
-    propagates, so a mid-batch failure never leaves an orphan that would dirty
-    the next round's worktree.
+    """Materialize the designer's output to disk.
+
+    The designer edits doc section files DIRECTLY with its Write/Edit tools
+    during its spawn (see DESIGNER_PROMPT); this function derives the changed
+    section set from git — never from LLM-authored diff text — so there is no
+    `git apply` and no malformed-patch failure mode. It then remaps the evidence
+    citations the designer wrote (the orchestrator reassigned the ids), records a
+    git-derived patch.diff, and writes evidence + claims from the parsed JSON.
+
+    ATOMIC: if any step raises, everything written or detected by this call —
+    including the designer's own doc edits — is discarded before the exception
+    propagates, so a rejected round leaves a clean worktree.
 
     Returns (materialized_paths_for_rollback, section_paths, claim_paths,
     attack_paths, evidence_paths) — the latter four are relative-to-workspace
@@ -813,6 +874,69 @@ def _materialize_designer_output(
     evidence_paths: list[str] = []
 
     try:
+        # ---- Doc sections: derive from git, enforce scope, remap cites ----
+        # Run BEFORE writing evidence/claims below, so the only dirty paths are
+        # the designer's doc edits plus orchestrator-owned in-flight ledger
+        # (repo-adapter evidence/, the appended actions.jsonl). Anything else the
+        # designer touched is an out-of-scope edit and rejects the round.
+        allowed_prefix = f"variants/nodes/{variant_id}/doc/"
+        variant_prefix = f"variants/nodes/{variant_id}/"
+
+        def _orchestrator_owned(rel: str) -> bool:
+            # Ledger paths the orchestrator (not the designer) writes: the global
+            # evidence dir + the round log, plus THIS variant's claims/attacks/
+            # scorecard, plus gitignored scratch/derived/rounds. A change here at
+            # doc-detection time is repo-adapter evidence, a prior-round file, or
+            # this materialize's own output — never a designer scope violation.
+            return (rel == "actions.jsonl"
+                    or rel.startswith("evidence/")
+                    or rel.startswith("rounds/")
+                    or rel.startswith("derived/")
+                    or rel.startswith(variant_prefix + "claims/")
+                    or rel.startswith(variant_prefix + "attacks/")
+                    or rel == variant_prefix + "scorecard.json")
+
+        out_of_scope: list[str] = []
+        for rel in _designer_changed_paths(workspace_root):
+            if rel.startswith(allowed_prefix):
+                p = workspace_root / rel
+                if not p.is_file():
+                    continue
+                if ev_remap:
+                    txt = p.read_text(encoding="utf-8", errors="replace")
+                    new_txt = _remap_cites_in_text(txt, ev_remap)
+                    if new_txt != txt:
+                        p.write_text(new_txt, encoding="utf-8")
+                section_paths.append(rel)
+                materialized.append(p)
+            elif _orchestrator_owned(rel):
+                continue
+            else:
+                out_of_scope.append(rel)
+        if out_of_scope:
+            # Roll the stray edits back before rejecting, so the round leaves a
+            # clean tree. The post-spawn scrub already removes untracked strays;
+            # this additionally restores any TRACKED file the designer modified
+            # outside its scope (e.g. goal.toml), which the scrub does not touch
+            # and which _discard_materialized would otherwise miss.
+            for rel in out_of_scope:
+                in_head = subprocess.run(
+                    ["git", "-C", str(workspace_root), "cat-file", "-e",
+                     f"HEAD:{rel}"], capture_output=True).returncode == 0
+                if in_head:
+                    subprocess.run(
+                        ["git", "-C", str(workspace_root), "checkout", "HEAD",
+                         "--", rel], capture_output=True)
+                else:
+                    try:
+                        (workspace_root / rel).unlink()
+                    except (FileNotFoundError, IsADirectoryError):
+                        pass
+            raise RuntimeError(
+                "designer modified files outside its doc scope "
+                f"({allowed_prefix}): {', '.join(sorted(out_of_scope))}")
+        _write_patch_diff_record(workspace_root, round_id, section_paths)
+
         # Evidence
         evidence_dir = workspace_root / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -867,64 +991,6 @@ def _materialize_designer_output(
             claim_paths.append(
                 f"variants/nodes/{variant_id}/claims/{cl_id}.json")
 
-        # patch_diff: if non-empty, apply with `git apply`. Empty is a no-op.
-        #
-        # The set of paths recorded here is load-bearing twice over: the merge
-        # commit stages exactly these (round_ledger.commit_merge), and a reject
-        # discards exactly these (_discard_materialized). It MUST equal what
-        # `git apply` actually writes to the worktree. Re-parsing the diff text
-        # for `+++ b/...` lines does NOT guarantee that — a diff that omits the
-        # `a/`/`b/` prefixes resolves to a different path under git's -p
-        # stripping, and a diff that touches a file outside this variant's doc/
-        # tree is applied but silently dropped by a doc-prefix filter. Either
-        # leaves an untracked/modified file behind that the next round's
-        # assert_clean_worktree aborts on (DirtyWorktreeError -> the whole run
-        # dies with "workspace has uncommitted changes").
-        #
-        # `git apply --numstat` reports the authoritative target paths, resolved
-        # with the SAME -p stripping the real apply uses, without touching the
-        # tree. We take that as the source of truth, enforce the doc-scope
-        # invariant on it (an out-of-scope write is a hard materialize failure,
-        # which the caller turns into a clean round rejection), then apply.
-        patch_diff = parsed.get("patch_diff", "") or ""
-        if patch_diff.strip():
-            numstat = subprocess.run(
-                ["git", "-C", str(workspace_root), "apply", "--numstat",
-                 "--whitespace=nowarn"],
-                input=patch_diff, text=True, capture_output=True)
-            if numstat.returncode != 0:
-                raise RuntimeError(
-                    f"git apply --numstat failed: {numstat.stderr.strip()}")
-            touched: list[str] = []
-            for line in numstat.stdout.splitlines():
-                # numstat format: "<added>\t<deleted>\t<path>"
-                parts = line.split("\t")
-                if len(parts) >= 3 and parts[2]:
-                    touched.append(parts[2])
-            allowed_prefix = f"variants/nodes/{variant_id}/doc/"
-            out_of_scope = sorted(
-                p for p in touched if not p.startswith(allowed_prefix))
-            if out_of_scope:
-                raise RuntimeError(
-                    "patch_diff writes outside this variant's doc scope "
-                    f"({allowed_prefix}): {', '.join(out_of_scope)}")
-            result = subprocess.run(
-                ["git", "-C", str(workspace_root), "apply",
-                 "--whitespace=nowarn"],
-                input=patch_diff, text=True, capture_output=True)
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"git apply failed: {result.stderr.strip()}")
-            for rel in touched:
-                section_paths.append(rel)
-                materialized.append(workspace_root / rel)
-
-        # Write the round's patch.diff pointer (always, even when empty) under
-        # the TRUSTED round_id so Reviewer/Verifier-C can point at a stable
-        # on-disk file.
-        round_dir = workspace_root / "rounds" / round_id
-        round_dir.mkdir(parents=True, exist_ok=True)
-        (round_dir / "patch.diff").write_text(patch_diff, encoding="utf-8")
     except Exception:
         _discard_materialized(workspace_root, materialized)
         raise
@@ -1246,6 +1312,10 @@ def _run_round_impl(
         workspace_root=workspace_root, round_id=round_id,
         variant_id=variant_id,
         validator=validate_designer_json,
+        # The designer authors doc sections by writing files directly; exempt
+        # its variant's doc tree from the post-spawn stray scrub so those edits
+        # survive to be detected and committed.
+        exempt_untracked_prefixes=[f"variants/nodes/{variant_id}/doc/"],
     )
     spawn_counts["designer"] = 1 + designer_result.retry_count
     if designer_result.verdict != "ok":
@@ -1272,9 +1342,11 @@ def _run_round_impl(
                     f"round={round_id!r} variant={variant_id!r}"))
     # The orchestrator owns ledger id allocation: the designer (an LLM) cannot
     # mint collision-free, append-only ids. Evidence first (it remaps
-    # claim.evidence_ids + doc citations), then claim ids. Both mutate dparsed
-    # in place BEFORE the scratch write so scratch + on-disk files agree.
-    _assign_evidence_ids(workspace_root, dparsed)
+    # claim.evidence_ids and returns the id remap), then claim ids. Both mutate
+    # dparsed in place BEFORE the scratch write so scratch + on-disk files agree.
+    # The returned remap rewrites the [^ev-*] citations in the doc files the
+    # designer wrote (applied inside _materialize_designer_output).
+    ev_remap = _assign_evidence_ids(workspace_root, dparsed)
     _assign_claim_ids(workspace_root, dparsed)
     round_ledger.write_role_scratch(
         workspace_root, round_id, "designer", dparsed,
@@ -1283,6 +1355,7 @@ def _run_round_impl(
         materialized, section_paths, claim_paths, _att_unused, evidence_paths = \
             _materialize_designer_output(
                 workspace_root, variant_id, round_id, designer_result.parsed,
+                ev_remap=ev_remap,
             )
     except RuntimeError as e:
         return _reject(

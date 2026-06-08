@@ -80,13 +80,46 @@ def _planner_ok(round_id="round-000001", variant="v-001"):
 
 
 def _designer_ok(round_id="round-000001", variant="v-001",
-                 claims=None, evidence=None, patch_diff=""):
+                 claims=None, evidence=None):
+    # The designer no longer returns a patch_diff — it edits doc files directly
+    # and the orchestrator derives the change set from git. Tests that need a
+    # section materialized should write the file themselves (see
+    # _designer_spawn_writing) to simulate the designer's direct edits.
     return RoleOutput(verdict="ok", parsed={
         "round": round_id, "variant": variant,
-        "patch_diff": patch_diff,
         "evidence": evidence or [],
         "claims": claims or [],
     }, retry_count=0, elapsed_seconds=0.1)
+
+
+def _write_doc_section(ws, variant, name, tags, body):
+    """Write variants/nodes/<variant>/doc/<name>.md with +++ frontmatter,
+    simulating a designer file edit."""
+    doc = ws / "variants" / "nodes" / variant / "doc"
+    doc.mkdir(parents=True, exist_ok=True)
+    tag_str = ", ".join(f'"{t}"' for t in tags)
+    (doc / f"{name}.md").write_text(
+        f'+++\nsection_id = "{name}"\ntags = [{tag_str}]\n+++\n{body}')
+
+
+def _spawn_seq(results, on_designer=None):
+    """spawn_role side_effect that returns `results` in call order. When the
+    MAIN designer (validator=validate_designer_json) is invoked, runs
+    on_designer() first to simulate the designer writing its section files."""
+    it = iter(results)
+    fired = {"designer": False}
+
+    def _fn(*args, **kwargs):
+        role = kwargs.get("role") if "role" in kwargs else (
+            args[0] if args else None)
+        if (role == "designer" and on_designer is not None
+                and not fired["designer"]
+                and kwargs.get("validator") is orchestrator.validate_designer_json):
+            fired["designer"] = True
+            on_designer()
+        return next(it)
+
+    return _fn
 
 
 def _reviewer_ok(round_id="round-000001", variant="v-001",
@@ -315,49 +348,53 @@ class EvidenceIdAllocationTest(unittest.TestCase):
         self.assertEqual(parsed["claims"][0]["evidence_ids"], ["ev-000005"],
                          "claim ref must follow the reassigned evidence id")
 
-    def test_remaps_doc_citations_in_patch_diff(self):
-        parsed = {
-            "patch_diff": "+++ b/doc/s.md\n+Body text.[^ev-000001] More.\n",
-            "evidence": [{"id": "ev-000001"}],
-            "claims": [],
-        }
-        orchestrator._assign_evidence_ids(self.ws, parsed)
-        # max=0 → first id is ev-000001, which equals the proposed id, so the
-        # citation is unchanged (no remap needed).
+    def test_remap_noop_when_proposed_id_is_free(self):
+        parsed = {"evidence": [{"id": "ev-000001"}], "claims": []}
+        remap = orchestrator._assign_evidence_ids(self.ws, parsed)
+        # max=0 → first id is ev-000001 == proposed, so no remap and the doc
+        # citation is left unchanged.
         self.assertEqual(parsed["evidence"][0]["id"], "ev-000001")
-        self.assertIn("[^ev-000001]", parsed["patch_diff"])
+        self.assertEqual(remap, {})
+        self.assertEqual(
+            orchestrator._remap_cites_in_text("Body.[^ev-000001].", remap),
+            "Body.[^ev-000001].")
 
-    def test_remaps_doc_citations_when_collision_forces_new_id(self):
+    def test_remap_on_collision_returns_map_and_rewrites_doc_cites(self):
         self._seed_evidence(1)  # ev-000001 exists → proposed ev-000001 collides
         parsed = {
-            "patch_diff": "+Body.[^ev-000001] and again [^ev-000001].\n",
             "evidence": [{"id": "ev-000001"}],
             "claims": [{"id": "cl-000001", "evidence_ids": ["ev-000001"]}],
         }
-        orchestrator._assign_evidence_ids(self.ws, parsed)
+        remap = orchestrator._assign_evidence_ids(self.ws, parsed)
         self.assertEqual(parsed["evidence"][0]["id"], "ev-000002")
-        self.assertNotIn("[^ev-000001]", parsed["patch_diff"])
-        self.assertEqual(parsed["patch_diff"].count("[^ev-000002]"), 2)
+        self.assertEqual(remap, {"ev-000001": "ev-000002"})
         self.assertEqual(parsed["claims"][0]["evidence_ids"], ["ev-000002"])
+        # The doc-file cite remap (now applied in materialize) uses this map.
+        rewritten = orchestrator._remap_cites_in_text(
+            "Body.[^ev-000001] and again [^ev-000001].", remap)
+        self.assertNotIn("[^ev-000001]", rewritten)
+        self.assertEqual(rewritten.count("[^ev-000002]"), 2)
 
     def test_swapped_ids_remap_correctly(self):
         # Designer emits ids out of order; remap keyed by original id, so a swap
         # resolves each ref to the right item. max=0 → assign 1,2 in order.
         parsed = {
-            "patch_diff": "+a [^ev-000007] b [^ev-000006]\n",
             "evidence": [{"id": "ev-000007"}, {"id": "ev-000006"}],
             "claims": [
                 {"id": "cl-1", "evidence_ids": ["ev-000007"]},
                 {"id": "cl-2", "evidence_ids": ["ev-000006"]},
             ],
         }
-        orchestrator._assign_evidence_ids(self.ws, parsed)
+        remap = orchestrator._assign_evidence_ids(self.ws, parsed)
         # item #1 (orig ev-000007) → ev-000001; item #2 (orig ev-000006) → ev-000002
         self.assertEqual([e["id"] for e in parsed["evidence"]],
                          ["ev-000001", "ev-000002"])
         self.assertEqual(parsed["claims"][0]["evidence_ids"], ["ev-000001"])
         self.assertEqual(parsed["claims"][1]["evidence_ids"], ["ev-000002"])
-        self.assertEqual(parsed["patch_diff"], "+a [^ev-000001] b [^ev-000002]\n")
+        self.assertEqual(
+            orchestrator._remap_cites_in_text(
+                "a [^ev-000007] b [^ev-000006]", remap),
+            "a [^ev-000001] b [^ev-000002]")
 
     def test_noop_when_no_evidence(self):
         for parsed in ({}, {"evidence": []}, {"evidence": None}):
@@ -425,24 +462,28 @@ class RunRoundDesignerFailureTest(unittest.TestCase):
         self.assertEqual(outcome.verdict, "spawn-failed")
         self.assertIsNotNone(outcome.rj_id)
 
-    def test_designer_patch_apply_failure_verdict_cross_field_fail(self):
-        # Designer emits a malformed patch_diff that git apply rejects
-        bad_diff = "--- this is not a valid unified diff ---\n"
-        designer_bad = _designer_ok(patch_diff=bad_diff)
-        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
-            _planner_ok(),
-            designer_bad,
-        ]):
+    def test_designer_out_of_scope_edit_rejects(self):
+        # There is no more "patch apply" failure. The analogous failure is the
+        # designer editing a TRACKED file outside its variant doc scope (the
+        # post-spawn scrub already drops untracked strays). Materialize detects
+        # it from git, rolls it back, and rejects the round.
+        goal = self.ws / "goal.toml"
+        original = goal.read_text()
+
+        def _edits_goal_toml():
+            goal.write_text(original + "\n# designer wandered off\n")
+        with mock.patch("harness.orchestrator.spawn_role",
+                        side_effect=_spawn_seq(
+                            [_planner_ok(), _designer_ok()],
+                            on_designer=_edits_goal_toml)):
             outcome = orchestrator.run_round(
-                self.ws, _harness_config(),
-                "round-000001", "v-001",
-            )
-        # The orchestrator surfaces materialization errors as phase-a-fail
-        # (pre-Verifier-A materialize step). We accept any of the failure
-        # verdicts: just confirm the round was rejected.
+                self.ws, _harness_config(), "round-000001", "v-001")
         self.assertIn(outcome.verdict, (
-            "phase-a-fail", "phase-b-fail", "output-parse-fail",
-        ))
+            "phase-a-fail", "phase-b-fail", "output-parse-fail"))
+        # The out-of-scope edit was rolled back — clean worktree for next round.
+        self.assertEqual(goal.read_text(), original)
+        from harness import bootstrap
+        self.assertEqual(bootstrap.recover_worktree(self.ws), [])
 
 
 class RunRoundVerifierAFailureTest(unittest.TestCase):
@@ -1167,91 +1208,60 @@ class MaterializeFailLoudTest(unittest.TestCase):
                    / "patch.diff").read_text()
         self.assertEqual(content, "")
 
-    # --- patch_diff staging must equal what git apply actually writes ---------
-    # Regression guard: a section authored via patch_diff that the path-capture
-    # misses is neither committed (merge) nor discarded (reject), leaving the
-    # worktree dirty so the next round's assert_clean_worktree aborts the run
-    # with "workspace has uncommitted changes".
+    # --- The designer's section set is derived from git, not an LLM patch ------
+    # The designer writes section files directly; materialize detects the change
+    # set from git, enforces doc scope, and rolls back out-of-scope edits.
 
     def _git_status(self):
         return subprocess.run(
             ["git", "-C", str(self.ws), "status", "--porcelain"],
             capture_output=True, text=True).stdout.strip()
 
+    def _parsed(self):
+        return {"round": "round-000001", "variant": "v-001",
+                "evidence": [], "claims": []}
+
     def test_in_scope_new_section_is_captured_for_staging(self):
         _commit_setup(self.ws)
-        diff = (
-            "diff --git a/variants/nodes/v-001/doc/01-x.md "
-            "b/variants/nodes/v-001/doc/01-x.md\n"
-            "new file mode 100644\n"
-            "--- /dev/null\n"
-            "+++ b/variants/nodes/v-001/doc/01-x.md\n"
-            "@@ -0,0 +1 @@\n+hi\n")
-        parsed = {"round": "round-000001", "variant": "v-001",
-                  "patch_diff": diff, "evidence": [], "claims": []}
+        # The designer wrote a section file directly.
+        _write_doc_section(self.ws, "v-001", "01-x", [], "hi\n")
         _materialized, section_paths, _c, _a, _e = \
             orchestrator._materialize_designer_output(
-                self.ws, "v-001", "round-000001", parsed)
+                self.ws, "v-001", "round-000001", self._parsed())
         self.assertIn("variants/nodes/v-001/doc/01-x.md", section_paths)
         self.assertTrue(
             (self.ws / "variants/nodes/v-001/doc/01-x.md").exists())
 
-    def test_out_of_scope_path_raises_and_leaves_tree_clean(self):
+    def test_out_of_scope_tracked_edit_raises_and_rolls_back(self):
         _commit_setup(self.ws)
-        diff = (
-            "diff --git a/NOTES.md b/NOTES.md\n"
-            "new file mode 100644\n"
-            "--- /dev/null\n"
-            "+++ b/NOTES.md\n"
-            "@@ -0,0 +1 @@\n+oops\n")
-        parsed = {"round": "round-000001", "variant": "v-001",
-                  "patch_diff": diff, "evidence": [], "claims": []}
+        goal = self.ws / "goal.toml"
+        original = goal.read_text()
+        goal.write_text(original + "\n# stray edit\n")  # tracked, out of scope
         with self.assertRaises(RuntimeError):
             orchestrator._materialize_designer_output(
-                self.ws, "v-001", "round-000001", parsed)
-        # numstat is a dry run — nothing should have been written to the tree.
+                self.ws, "v-001", "round-000001", self._parsed())
+        self.assertEqual(goal.read_text(), original)  # restored
         self.assertEqual(self._git_status(), "")
-        self.assertFalse((self.ws / "NOTES.md").exists())
 
-    def test_missing_ab_prefix_resolving_out_of_scope_raises(self):
+    def test_out_of_scope_untracked_file_raises_and_removed(self):
         _commit_setup(self.ws)
-        # No `a/`/`b/` prefixes: git's -p stripping resolves this to
-        # "nodes/v-001/doc/01-x.md", outside the variant doc scope.
-        diff = (
-            "--- /dev/null\n"
-            "+++ variants/nodes/v-001/doc/01-x.md\n"
-            "@@ -0,0 +1 @@\n+hi\n")
-        parsed = {"round": "round-000001", "variant": "v-001",
-                  "patch_diff": diff, "evidence": [], "claims": []}
+        (self.ws / "NOTES.md").write_text("oops\n")  # untracked, out of scope
         with self.assertRaises(RuntimeError):
             orchestrator._materialize_designer_output(
-                self.ws, "v-001", "round-000001", parsed)
+                self.ws, "v-001", "round-000001", self._parsed())
+        self.assertFalse((self.ws / "NOTES.md").exists())
         self.assertEqual(self._git_status(), "")
 
     def test_wrong_variant_doc_path_raises(self):
         _commit_setup(self.ws)
-        diff = (
-            "diff --git a/variants/nodes/v-002/doc/01-x.md "
-            "b/variants/nodes/v-002/doc/01-x.md\n"
-            "new file mode 100644\n"
-            "--- /dev/null\n"
-            "+++ b/variants/nodes/v-002/doc/01-x.md\n"
-            "@@ -0,0 +1 @@\n+hi\n")
-        parsed = {"round": "round-000001", "variant": "v-001",
-                  "patch_diff": diff, "evidence": [], "claims": []}
+        _write_doc_section(self.ws, "v-002", "01-x", [], "hi\n")  # wrong variant
         with self.assertRaises(RuntimeError):
             orchestrator._materialize_designer_output(
-                self.ws, "v-001", "round-000001", parsed)
+                self.ws, "v-001", "round-000001", self._parsed())
         self.assertEqual(self._git_status(), "")
 
 
 class ValidateDesignerStrictTest(unittest.TestCase):
-    def test_non_string_patch_diff_raises(self):
-        with self.assertRaises(ValueError):
-            orchestrator.validate_designer_json({
-                "round": "r", "variant": "v", "patch_diff": 123,
-                "evidence": [], "claims": []})
-
     def test_claim_evidence_id_not_in_round_raises(self):
         with self.assertRaises(ValueError):
             orchestrator.validate_designer_json({
@@ -1348,6 +1358,47 @@ class BadAttackRejectsNotCrashTest(unittest.TestCase):
         # Worktree recovered to a clean state (no crash, next round can run).
         from harness import bootstrap
         self.assertEqual(bootstrap.recover_worktree(self.ws), [])
+
+
+class DesignerDirectWriteRoundTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_designer_written_section_is_committed_and_patch_recorded(self):
+        # The end-to-end new path: the designer EDITS a file directly; the
+        # orchestrator detects it from git, commits it, and records a
+        # git-DERIVED patch.diff (no LLM patch, no git apply).
+        evidence = [{"id": "ev-000001", "confidence": "high", "citations": [],
+                     "claim": "backoff", "excerpt": "exponential backoff"}]
+        claim = {"section_id": "retry-policy", "decision_id": "retry-policy",
+                 "claim_type": "decision", "evidence_ids": ["ev-000001"],
+                 "assertion": "Use expo-backoff.", "position": "expo-backoff"}
+
+        def _writer():
+            _write_doc_section(self.ws, "v-001", "01-retry", ["decided"],
+                               "Use exponential backoff [^ev-000001].\n")
+
+        with mock.patch("harness.orchestrator.spawn_role",
+                        side_effect=_spawn_seq(
+                            [_planner_ok(),
+                             _designer_ok(claims=[claim], evidence=evidence),
+                             _reviewer_ok(), _verifier_c_ok()],
+                            on_designer=_writer)):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "merge", outcome.detail)
+        committed = subprocess.check_output(
+            ["git", "-C", str(self.ws), "show",
+             "HEAD:variants/nodes/v-001/doc/01-retry.md"], text=True)
+        self.assertIn("[^ev-000001]", committed)
+        patch = (self.ws / "rounds" / "round-000001" / "patch.diff").read_text()
+        self.assertIn("01-retry.md", patch)
+        self.assertIn("+++", patch)
 
 
 class FreshInitRoundReachesMergeTest(unittest.TestCase):

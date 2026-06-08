@@ -15,6 +15,12 @@ model = "claude-haiku-4-5-20251001"
 [models.designer]
 tool  = "claude"
 model = "claude-opus-4-7-20260315"
+# The designer authors doc sections by editing files directly (the harness
+# derives the patch from git — the LLM never writes diff text). Write/Edit are
+# required; Read/Grep/Glob let it inspect the current doc + evidence. The harness
+# scopes edits to the variant's doc dir and rejects anything outside it.
+allowed_tools = ["Read", "Grep", "Glob", "Write", "Edit"]
+permission_mode = "acceptEdits"
 
 [models.reviewer]
 tool  = "claude"

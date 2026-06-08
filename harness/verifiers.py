@@ -151,6 +151,17 @@ def _walk_sections(variants_nodes_root: Path):
 
 _FENCED_CODE_RE = re.compile(r"```[^\n]*\n.*?\n```", re.DOTALL)
 _HEADING_LINE_RE = re.compile(r"^#{1,6}(\s.*)?$", re.MULTILINE)
+# Markdown metadata lines — e.g. "**Status**: draft, pre-impl" or
+# "**Date**: 2026-06-08" — are document metadata, not assertions, and must not
+# be subject to the cite requirement. A metadata line is one whose first
+# non-space content (after an optional blockquote `>` or list bullet) is a bold
+# label (`**Label**`) immediately followed by a colon; one or more such
+# "**Label**: value" segments may share a line. Stripped whole, like headings,
+# before sentence-splitting so their stray sentence-final punctuation can't
+# manufacture a phantom uncited "assertion". The colon requirement is what keeps
+# this from eating emphasized prose like "**Note** the system retries."
+_METADATA_LINE_RE = re.compile(
+    r"^[ \t]*(?:[>\-*+][ \t]+)?\*\*[^*\n]+\*\*[ \t]*:.*$", re.MULTILINE)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?:\s+|\Z)")
 _CITE_RE = re.compile(r"\[\^ev-(\d{6})\]")
 # Unicode-aware letter detection — \w with re.UNICODE matches any Unicode
@@ -180,6 +191,7 @@ def verify_citation_completeness(variants_nodes_root: Path) -> VerifierResult:
             continue
         prose = _FENCED_CODE_RE.sub("", body)
         prose = _HEADING_LINE_RE.sub("", prose)
+        prose = _METADATA_LINE_RE.sub("", prose)
         for sentence in _SENTENCE_SPLIT_RE.split(prose):
             sentence = sentence.strip()
             if not sentence:

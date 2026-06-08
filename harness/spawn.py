@@ -437,19 +437,25 @@ def spawn_role(
     round_id: str,
     variant_id: str | None,
     validator: Callable[[dict], None] | None = None,
+    exempt_untracked_prefixes: "list[str] | None" = None,
 ) -> RoleOutput:
     """Spawn a role, then scrub any untracked, non-ignored file it left behind.
 
-    Every role returns its result as JSON on stdout; the orchestrator does ALL
-    legitimate file materialization from that parsed output AFTER this returns.
-    So any untracked, non-ignored file that appears DURING the spawn is an agent
-    side-effect — a model writing to its cwd=workspace_root under an arbitrary
-    name (e.g. repo_adapter.json at the root) — and is removed here, at the
-    source, so it can never dirty a later round's clean-worktree check. Files
-    materialized by EARLIER phases are in the pre-spawn snapshot and preserved;
-    gitignored scratch (CONTEXT.md, attempt dumps) is exempt via
-    --exclude-standard. Scrubbing is best-effort and never masks the spawn
-    result (it runs in `finally`, swallowing its own errors)."""
+    Most roles return their result as JSON on stdout and the orchestrator does
+    all file materialization AFTER this returns — so any untracked, non-ignored
+    file that appears DURING the spawn is an agent side-effect (a model writing
+    to its cwd=workspace_root under an arbitrary name, e.g. repo_adapter.json at
+    the root) and is removed here, at the source, before it can dirty a later
+    round's clean-worktree check. Files materialized by EARLIER phases are in the
+    pre-spawn snapshot and preserved; gitignored scratch is exempt via
+    --exclude-standard.
+
+    EXCEPTION: the designer authors doc sections by writing files directly, so
+    its call passes exempt_untracked_prefixes=[its variant doc dir] — new files
+    under those prefixes are legitimate output and NOT scrubbed. Scrubbing is
+    best-effort and never masks the spawn result (it runs in `finally`,
+    swallowing its own errors)."""
+    exempt = tuple(exempt_untracked_prefixes or ())
     before = _untracked_nonignored(workspace_root)
     try:
         return _spawn_role_impl(
@@ -458,6 +464,8 @@ def spawn_role(
     finally:
         try:
             for rel in sorted(_untracked_nonignored(workspace_root) - before):
+                if exempt and rel.startswith(exempt):
+                    continue
                 target = workspace_root / rel
                 try:
                     if target.is_dir():

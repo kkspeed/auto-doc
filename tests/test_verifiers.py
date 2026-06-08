@@ -260,6 +260,50 @@ class VerifyCitationCompletenessTest(unittest.TestCase):
         result = v.verify_citation_completeness(self.variants)
         self.assertEqual(result.verdict, "pass")
 
+    def test_metadata_lines_skipped(self):
+        # Markdown metadata like "**Status**: draft" / "**Date**: ..." is not an
+        # assertion and must not require a cite (the reported false positive).
+        body = (
+            "**Status**: draft, pre-impl **Date**: 2026-06-08.\n"
+            "**Owner**: platform-team\n"
+            "Retry policy uses exponential backoff [^ev-000001].\n"
+        )
+        _write_section(self.variants, "v-001", "01-retry", ["decided"], body)
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "pass",
+                         f"failures: {result.failures}")
+
+    def test_metadata_line_does_not_mask_a_real_uncited_claim(self):
+        # Stripping metadata must not swallow a following real assertion.
+        body = (
+            "**Status**: draft.\n"
+            "We assume the worst case.\n"  # real uncited assertion
+        )
+        _write_section(self.variants, "v-001", "01-retry", ["decided"], body)
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn("worst case", result.failures[0].detail)
+
+    def test_blockquoted_and_bulleted_metadata_skipped(self):
+        body = (
+            "> **Status**: draft.\n"
+            "- **Owner**: platform-team.\n"
+            "Retry policy uses exponential backoff [^ev-000001].\n"
+        )
+        _write_section(self.variants, "v-001", "01-retry", ["decided"], body)
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "pass",
+                         f"failures: {result.failures}")
+
+    def test_bold_emphasis_without_colon_still_requires_cite(self):
+        # Only "**Label**:" metadata is exempt — emphasized prose is not.
+        body = "**Important** the system must retry on failure.\n"
+        _write_section(self.variants, "v-001", "01-retry", ["decided"], body)
+        result = v.verify_citation_completeness(self.variants)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(result.failures[0].kind, "uncited-claim")
+
     def test_empty_body_passes(self):
         _write_section(self.variants, "v-001", "01-empty", ["decided"], "")
         result = v.verify_citation_completeness(self.variants)
