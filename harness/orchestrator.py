@@ -181,11 +181,60 @@ def validate_reviewer_json(d: dict) -> None:
             raise ValueError(
                 f"reviewer.json {key} must be a float in [0,1], got {v!r}"
             )
-    # decision_proposals and attacks roundtrip via their dataclass from_dict
-    for v in d.get("decision_proposals", []) or []:
-        cg.DecisionProposalVerdict.from_dict(v)
-    for a in d.get("attacks", []) or []:
-        cg.Attack.from_dict(a)
+    # decision_proposals and attacks. Aggregate every problem into one message
+    # (so a single correction pass fixes them all, not one field at a time), and
+    # do NOT require an attack 'id' — the orchestrator assigns it
+    # (_assign_attack_ids), so requiring a field we discard is a needless failure
+    # mode.
+    errors: list[str] = []
+    for i, v in enumerate(d.get("decision_proposals", []) or []):
+        try:
+            cg.DecisionProposalVerdict.from_dict(v)
+        except Exception as e:
+            errors.append(f"decision_proposals[{i}]: {e}")
+    for i, a in enumerate(d.get("attacks", []) or []):
+        errors.extend(_attack_field_errors(i, a))
+    if errors:
+        raise ValueError(
+            f"reviewer.json has {len(errors)} attack/proposal error(s):\n- "
+            + "\n- ".join(errors))
+
+
+# Required fields per attack type (mirrors cg.Attack.from_dict), EXCLUDING the
+# orchestrator-assigned 'id'. propose_canonicalization also requires 'scope'
+# when kind == "position" (handled below).
+_ATTACK_REQUIRED_FIELDS = {
+    "dispute_claim": ("target_claim_id", "argument"),
+    "propose_decision_cut": ("target_decision_id", "rationale"),
+    "propose_canonicalization": ("kind", "from", "to", "confidence",
+                                 "rationale"),
+}
+
+
+def _attack_field_errors(i: int, a: dict) -> list[str]:
+    """Return ALL schema problems for one attack (empty if valid), surfacing
+    every missing required field at once rather than failing on the first."""
+    if not isinstance(a, dict):
+        return [f"attacks[{i}] must be a JSON object"]
+    at_type = a.get("at_type")
+    if at_type not in _ATTACK_REQUIRED_FIELDS:
+        return [f"attacks[{i}] at_type must be one of "
+                f"{sorted(_ATTACK_REQUIRED_FIELDS)}, got {at_type!r}"]
+    required = list(_ATTACK_REQUIRED_FIELDS[at_type])
+    if at_type == "propose_canonicalization" and a.get("kind") == "position":
+        required.append("scope")
+    missing = [f for f in required if f not in a]
+    if missing:
+        return [f"attacks[{i}] ({at_type}) missing required field(s): "
+                f"{', '.join(missing)} (do NOT include 'id' — the harness "
+                "assigns it)"]
+    # All required fields present → run the dataclass for enum/slug checks,
+    # supplying a placeholder for the orchestrator-assigned id.
+    try:
+        cg.Attack.from_dict(a if "id" in a else {**a, "id": "at-000000"})
+    except Exception as e:
+        return [f"attacks[{i}]: {e}"]
+    return []
 
 
 def validate_verifier_c_json(d: dict) -> None:
@@ -363,8 +412,16 @@ REVIEWER_PROMPT = (
     "fields: round, variant, decision (accept|reject), rationale, optional "
     "rejection {reason_class, ...} on reject, optional decision_proposals "
     "(list of {proposed_id, verdict (approve|reject), rationale}) when the "
-    "designer proposed new decisions, optional attacks (list of at-*.json "
-    "dicts). "
+    "designer proposed new decisions, optional attacks (list). "
+    "Each ATTACK is an object whose REQUIRED fields depend on its at_type "
+    "(exactly one of dispute_claim, propose_decision_cut, "
+    "propose_canonicalization). Do NOT include an attack 'id' — the harness "
+    "assigns it. Required fields by type: "
+    "dispute_claim → target_claim_id (a cl-NNNNNN id), argument (string); "
+    "optionally target_variant, evidence_ids. "
+    "propose_decision_cut → target_decision_id (slug), rationale (string). "
+    "propose_canonicalization → kind, from (slug), to (slug), confidence "
+    "(high|medium|low), rationale; plus scope (slug) when kind is 'position'. "
     "Also emit five quality scores, each a float in [0,1], judged from the "
     "doc + claims + cited evidence you read: "
     "goal_alignment (how well this round's doc serves the stated goal); "
@@ -471,6 +528,43 @@ def _assign_claim_ids(workspace_root: Path, parsed: dict) -> None:
         if not isinstance(claim, dict):
             continue
         claim["id"] = f"cl-{next_seq:06d}"
+        next_seq += 1
+
+
+_ATTACK_SEQ_RE = re.compile(r"^at-(\d{6})$")
+
+
+def _max_existing_attack_seq(workspace_root: Path) -> int:
+    """Highest at-NNNNNN sequence number across every variant's attacks dir
+    (0 if none exist yet). Scanned globally — attack ids are an append-only,
+    workspace-wide ledger, so ids must be unique across variants."""
+    max_seq = 0
+    nodes = workspace_root / "variants" / "nodes"
+    if not nodes.exists():
+        return 0
+    for at_path in nodes.glob("*/attacks/at-*.json"):
+        m = _ATTACK_SEQ_RE.match(at_path.stem)
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
+    return max_seq
+
+
+def _assign_attack_ids(workspace_root: Path, parsed: dict) -> None:
+    """Reassign every reviewer attack a fresh, globally-unique, append-only
+    at-NNNNNN id, mutating parsed['attacks'] in place — for the same reason as
+    _assign_claim_ids. An attack's id is only its own filename + a report label;
+    attacks are enumerated by glob and matched by content (target_claim_id,
+    target_decision_id, scope), never looked up by their own id, so overwriting
+    the reviewer's chosen id breaks nothing. Must run BEFORE the reviewer scratch
+    write so scratch and the on-disk at-*.json files share the assigned ids."""
+    attacks = parsed.get("attacks")
+    if not isinstance(attacks, list):
+        return
+    next_seq = _max_existing_attack_seq(workspace_root) + 1
+    for attack in attacks:
+        if not isinstance(attack, dict):
+            continue
+        attack["id"] = f"at-{next_seq:06d}"
         next_seq += 1
 
 
@@ -1279,6 +1373,10 @@ def _run_round_impl(
             failed_phase="reviewer",
             detail=f"reviewer: {reviewer_result.stderr_tail or reviewer_result.verdict}",
         )
+    # The orchestrator owns attack id allocation (the reviewer, an LLM, cannot
+    # mint collision-free append-only ids). Assign before the scratch write so
+    # scratch + on-disk at-*.json agree.
+    _assign_attack_ids(workspace_root, reviewer_result.parsed)
     round_ledger.write_role_scratch(
         workspace_root, round_id, "reviewer", reviewer_result.parsed,
     )

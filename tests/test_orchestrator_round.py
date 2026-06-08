@@ -1293,6 +1293,30 @@ class ValidateDesignerStrictTest(unittest.TestCase):
             self.assertIn(field, msg)
 
 
+class ValidateReviewerAttackTest(unittest.TestCase):
+    BASE = {"round": "r", "variant": "v", "decision": "accept",
+            "rationale": "ok", "goal_alignment": 0.5,
+            "technical_correctness": 0.5}
+
+    def test_attack_without_id_is_accepted(self):
+        # Attack ids are orchestrator-assigned (_assign_attack_ids), so omitting
+        # 'id' must validate cleanly.
+        orchestrator.validate_reviewer_json({
+            **self.BASE,
+            "attacks": [{"at_type": "dispute_claim",
+                         "target_claim_id": "cl-000001", "argument": "a"}]})
+
+    def test_aggregates_all_missing_attack_fields(self):
+        # Both missing fields of one attack surface together (not one at a time),
+        # so the single correction pass can fix them both. 'id' is NOT required.
+        with self.assertRaises(ValueError) as cm:
+            orchestrator.validate_reviewer_json({
+                **self.BASE, "attacks": [{"at_type": "dispute_claim"}]})
+        msg = str(cm.exception)
+        self.assertIn("target_claim_id", msg)
+        self.assertIn("argument", msg)
+
+
 class BadAttackRejectsNotCrashTest(unittest.TestCase):
     def setUp(self):
         self.td = Path(tempfile.mkdtemp())
@@ -1304,7 +1328,12 @@ class BadAttackRejectsNotCrashTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.td, ignore_errors=True)
 
-    def test_malformed_attack_id_rejects(self):
+    def test_content_malformed_attack_does_not_merge_or_crash(self):
+        # A content-malformed attack (missing dispute_claim fields) that bypasses
+        # validation here — spawn_role is mocked — must still NOT merge and must
+        # not crash the harness; the commit hook is the backstop. (Its id, even
+        # the unsafe '../evil', is sanitized by _assign_attack_ids first, so the
+        # round no longer trips the old materialize id guard.)
         claim = {"id": "cl-000001", "section_id": "retry-policy",
                  "decision_id": "retry-policy", "claim_type": "decision",
                  "evidence_ids": [], "assertion": "x", "position": "expo"}
@@ -1315,7 +1344,10 @@ class BadAttackRejectsNotCrashTest(unittest.TestCase):
         ]):
             outcome = orchestrator.run_round(
                 self.ws, _harness_config(), "round-000001", "v-001")
-        self.assertEqual(outcome.verdict, "reviewer-rejected")
+        self.assertNotEqual(outcome.verdict, "merge")
+        # Worktree recovered to a clean state (no crash, next round can run).
+        from harness import bootstrap
+        self.assertEqual(bootstrap.recover_worktree(self.ws), [])
 
 
 class FreshInitRoundReachesMergeTest(unittest.TestCase):
