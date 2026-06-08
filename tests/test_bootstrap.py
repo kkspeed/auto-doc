@@ -200,19 +200,42 @@ class RecoverWorktreeTest(unittest.TestCase):
         bootstrap.recover_worktree(self.td)
         self.assertFalse((self.td / "actions.jsonl").exists())
 
-    def test_foreign_file_raises_and_preserves_everything(self):
-        (self.td / "stray.txt").write_text("operator file")
-        ledger_stray = (self.td / "evidence")
+    def test_untracked_root_stray_discarded(self):
+        # The reported case: an agent wrote a non-ledger file at the workspace
+        # root. Untracked + not operator config → discard, wherever it lives.
+        stray = self.td / "repo_adapter.json"
+        stray.write_text('{"leaked":"by an agent spawn"}\n')
+        discarded = bootstrap.recover_worktree(self.td)
+        self.assertIn("repo_adapter.json", discarded)
+        self.assertFalse(stray.exists())
+        self.assertEqual(self._status(), "")
+
+    def test_untracked_operator_file_raises_and_preserves_everything(self):
+        # A not-yet-committed operator config must NOT be deleted, and the
+        # presence of operator dirt makes recovery refuse to touch anything.
+        (self.td / ".mcp.json").write_text('{"mcpServers":{}}\n')
+        ledger_stray = self.td / "evidence"
         ledger_stray.mkdir()
         (ledger_stray / "ev-000001.md").write_text("x")
         with self.assertRaises(bootstrap.DirtyWorktreeError):
             bootstrap.recover_worktree(self.td)
-        # Refuses to touch ANYTHING when operator-owned dirt is present.
-        self.assertTrue((self.td / "stray.txt").exists())
+        self.assertTrue((self.td / ".mcp.json").exists())
         self.assertTrue((ledger_stray / "ev-000001.md").exists())
 
     def test_modified_config_raises(self):
         (self.td / "goal.toml").write_text('goal_version = "g-02"\n')
+        with self.assertRaises(bootstrap.DirtyWorktreeError):
+            bootstrap.recover_worktree(self.td)
+
+    def test_modified_non_ledger_tracked_file_raises(self):
+        # An edit to a tracked file outside the ledger is never auto-clobbered.
+        readme = self.td / "README.md"
+        readme.write_text("v1\n")
+        subprocess.check_call(["git", "-C", str(self.td), "add", "README.md"])
+        subprocess.check_call(
+            ["git", "-C", str(self.td), "-c", "user.email=h@l",
+             "-c", "user.name=h", "commit", "-q", "-m", "add readme"])
+        readme.write_text("operator edit\n")
         with self.assertRaises(bootstrap.DirtyWorktreeError):
             bootstrap.recover_worktree(self.td)
 

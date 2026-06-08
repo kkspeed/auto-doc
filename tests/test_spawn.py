@@ -640,5 +640,52 @@ class SpawnCwdTest(unittest.TestCase):
         self.assertIsNone(captured["cwd"])  # None, not the string "None"
 
 
+import subprocess as _subprocess
+
+
+class SpawnRoleScrubTest(unittest.TestCase):
+    """spawn_role removes untracked, non-ignored files a spawn left behind
+    (agent side-effects) while preserving earlier-phase materializations and
+    gitignored scratch."""
+
+    def setUp(self):
+        self.td = _Path(tempfile.mkdtemp())
+        _subprocess.check_call(["git", "init", "-q"], cwd=self.td)
+        (self.td / ".gitignore").write_text("derived/\nrounds/*/scratch/\n")
+        (self.td / "base.txt").write_text("x")
+        _subprocess.check_call(["git", "-C", str(self.td), "add", "."])
+        _subprocess.check_call(
+            ["git", "-C", str(self.td), "-c", "user.email=h@l",
+             "-c", "user.name=h", "commit", "-q", "-m", "init"])
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_scrubs_agent_stray_preserves_preexisting_and_ignored(self):
+        # An untracked file from an earlier phase must survive the spawn.
+        preexisting = self.td / "evidence" / "ev-000001.md"
+        preexisting.parent.mkdir(parents=True)
+        preexisting.write_text("materialized by an earlier phase")
+
+        def fake_impl(*a, **k):
+            # The agent writes a stray to its cwd; the harness writes gitignored
+            # scratch. Only the former should be scrubbed.
+            (self.td / "repo_adapter.json").write_text('{"agent":"stray"}')
+            (self.td / "derived").mkdir(exist_ok=True)
+            (self.td / "derived" / "cache.json").write_text("{}")
+            return spawn.RoleOutput(verdict="ok", parsed={"ok": True})
+
+        with mock.patch("harness.spawn._spawn_role_impl", side_effect=fake_impl):
+            result = spawn.spawn_role(
+                role="repo_adapter", harness_config=_make_config("ok"),
+                context_md="c", prompt="p", workspace_root=self.td,
+                round_id="round-000001", variant_id="v-001")
+
+        self.assertEqual(result.verdict, "ok")
+        self.assertFalse((self.td / "repo_adapter.json").exists())   # scrubbed
+        self.assertTrue(preexisting.exists())                        # preserved
+        self.assertTrue((self.td / "derived" / "cache.json").exists())  # ignored
+
+
 if __name__ == "__main__":
     unittest.main()

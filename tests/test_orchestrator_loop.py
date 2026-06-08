@@ -242,11 +242,31 @@ class RunLoopBootstrapTest(unittest.TestCase):
         self.assertIn("harness: seed variant documents", log)
         self.assertIn("Action: init", log)
 
-    def test_aborts_on_dirty_worktree(self):
+    def test_aborts_on_operator_dirty_worktree(self):
+        # Operator-owned dirt (an edit to tracked goal.toml) still aborts rather
+        # than being silently clobbered.
         from harness import bootstrap
-        (self.ws / "stray.txt").write_text("dirty")
+        goal = self.ws / "goal.toml"
+        goal.write_text(goal.read_text() + "\n# operator edit\n")
         with self.assertRaises(bootstrap.DirtyWorktreeError):
             orchestrator.run_loop(self.ws, _harness_config(), max_rounds=1)
+
+    def test_recovers_from_untracked_root_stray(self):
+        # An agent-written non-ledger stray at the workspace root (the reported
+        # repo_adapter.json case) is discarded; the run proceeds, not aborts.
+        stray = self.ws / "repo_adapter.json"
+        stray.write_text('{"leaked":true}\n')
+
+        def fake_run_round(workspace_root, harness_config, round_id, variant_id):
+            return orchestrator.RoundOutcome(
+                round_id=round_id, variant_id=variant_id,
+                verdict="spawn-failed", elapsed_seconds=0.01)
+        with mock.patch("harness.orchestrator.run_round",
+                        side_effect=fake_run_round):
+            outcomes = orchestrator.run_loop(
+                self.ws, _harness_config(), max_rounds=1, variant_count=2)
+        self.assertEqual(len(outcomes), 1)
+        self.assertFalse(stray.exists())
 
     def test_recovers_from_leaked_ledger_file(self):
         # The reported failure mode: a previous round left an uncommitted doc

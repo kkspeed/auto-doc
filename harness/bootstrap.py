@@ -72,24 +72,40 @@ def assert_clean_worktree(workspace_root: Path) -> None:
             f"running:\n{out.stdout.rstrip()}")
 
 
-# Paths the harness itself owns and writes through the round loop. Anything
-# uncommitted under these is, by definition, NOT part of the durable
-# append-only ledger (which is built exclusively from commits) — it is a leaked
-# artifact (an LLM spawn writing directly to its cwd=workspace_root, a round
-# interrupted between `git apply` and its commit, a partial materialize) and is
-# always safe to discard back to HEAD. Everything else (goal.toml, harness.toml,
-# constitution.md, seed_doc.md, .mcp.json, anything unrecognized) is treated as
-# operator-owned and is NEVER auto-discarded.
+# Recovery classification. The durable ledger is built EXCLUSIVELY from commits,
+# so the rules are:
+#   - An UNTRACKED file is never committed ledger state and is never operator
+#     config (config below is tracked) — it is a leaked artifact (an LLM spawn
+#     writing to its cwd=workspace_root under an arbitrary name like
+#     repo_adapter.json, a round interrupted before its commit, a partial
+#     materialize) and is safe to discard, wherever it lives. The ONE exception
+#     is a known operator file the operator may have newly created but not yet
+#     committed — we refuse to delete those.
+#   - A TRACKED file with uncommitted changes is auto-restored ONLY when it is
+#     part of the harness ledger; an edit to operator config or any other
+#     tracked file must never be silently clobbered.
 _LEDGER_DIR_PREFIXES = (
     "variants/", "evidence/", "rejections/", "rounds/", "derived/",
 )
 _LEDGER_FILES = ("actions.jsonl", "morning_brief.md", "CONTEXT.md")
+
+# Operator-authored inputs. Tracked, so an *edit* to one shows up as a tracked
+# modification (→ raise); but we also refuse to discard one if it appears
+# untracked (a freshly-added .mcp.json the operator hasn't committed yet).
+_OPERATOR_FILES = frozenset({
+    "goal.toml", "harness.toml", "constitution.md", "seed_doc.md",
+    ".mcp.json", ".gitignore",
+})
 
 
 def _is_ledger_owned(rel: str) -> bool:
     rel = rel.rstrip("/")
     return (rel in _LEDGER_FILES
             or any((rel + "/").startswith(p) for p in _LEDGER_DIR_PREFIXES))
+
+
+def _is_operator_owned(rel: str) -> bool:
+    return rel.rstrip("/") in _OPERATOR_FILES
 
 
 def _parse_porcelain_z(raw: str) -> list[tuple[str, str]]:
@@ -115,16 +131,18 @@ def _parse_porcelain_z(raw: str) -> list[tuple[str, str]]:
 
 
 def recover_worktree(workspace_root: Path) -> list[str]:
-    """Restore a clean worktree by discarding uncommitted changes under the
-    harness-owned ledger paths, then return the sorted list of paths discarded.
+    """Restore a clean worktree by discarding leaked artifacts, then return the
+    sorted list of paths discarded.
 
-    This is the recoverable replacement for assert_clean_worktree at run/round
-    start. Leaked ledger artifacts (see _is_ledger_owned) are reset to HEAD so a
-    stray file from a previous round or an interrupted run can never abort the
-    next round. If git status cannot be determined, or if any uncommitted change
-    is OUTSIDE the ledger (operator-owned config, or an unrecognized path), this
-    raises DirtyWorktreeError unchanged — auto-clobbering an operator's edits
-    would be worse than aborting, and a non-git path must never look clean."""
+    The recoverable replacement for assert_clean_worktree at run/round start.
+    Discards every untracked, non-ignored stray (an agent side-effect can land at
+    any path/name, so this is NOT limited to known ledger directories) plus any
+    uncommitted change to a tracked ledger file, resetting them to HEAD so a
+    stray from a previous round or an interrupted run can never abort the next
+    round. Raises DirtyWorktreeError — rather than clobbering — when an operator
+    file is dirty (a tracked edit, or a not-yet-committed new operator file) or
+    any other tracked file has uncommitted changes, and when git status cannot be
+    determined (a non-git path must never look clean)."""
     out = subprocess.run(
         ["git", "-C", str(workspace_root), "-c", "core.quotePath=false",
          "status", "--porcelain", "-z"],
@@ -138,16 +156,32 @@ def recover_worktree(workspace_root: Path) -> list[str]:
     if not entries:
         return []
 
-    ledger = [(xy, p) for xy, p in entries if _is_ledger_owned(p)]
-    foreign = [(xy, p) for xy, p in entries if not _is_ledger_owned(p)]
+    to_discard: list[str] = []
+    foreign: list[tuple[str, str]] = []
+    for xy, path in entries:
+        if xy == "??":
+            # Untracked: discard unless it's a known operator file the operator
+            # may have added but not yet committed.
+            if _is_operator_owned(path):
+                foreign.append((xy, path))
+            else:
+                to_discard.append(path)
+        elif _is_ledger_owned(path):
+            # Tracked ledger file with uncommitted changes → restore to HEAD.
+            to_discard.append(path)
+        else:
+            # Tracked operator config or any other tracked file was edited →
+            # never clobber it.
+            foreign.append((xy, path))
     if foreign:
         listing = "\n".join(f"{xy} {p}" for xy, p in foreign)
         raise DirtyWorktreeError(
-            "workspace has uncommitted changes outside the harness ledger — "
-            f"commit or discard before running:\n{listing}")
+            "workspace has uncommitted changes that are operator-owned or an "
+            "unrecognized tracked file — commit or discard before running:\n"
+            f"{listing}")
 
     discarded: list[str] = []
-    for _xy, path in ledger:
+    for path in to_discard:
         # Unstage first so a path staged by an interrupted commit is handled
         # uniformly with an unstaged one.
         subprocess.run(

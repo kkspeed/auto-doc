@@ -26,6 +26,7 @@ class RoleOutput:
 
 
 import collections
+import shutil
 import subprocess
 import threading
 import time
@@ -398,7 +399,62 @@ def _write_attempt_files(scratch_dir: Path, role: str, attempt: str,
     )
 
 
+def _untracked_nonignored(workspace_root: Path) -> set[str]:
+    """Set of untracked, non-gitignored paths in the workspace. Best-effort:
+    returns empty if git can't answer (e.g. a non-git workspace in a unit test),
+    which makes the surrounding scrub a no-op."""
+    out = subprocess.run(
+        ["git", "-C", str(workspace_root), "ls-files", "--others",
+         "--exclude-standard", "-z"],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        return set()
+    return {p for p in out.stdout.split("\0") if p}
+
+
 def spawn_role(
+    role: str,
+    harness_config: dict,
+    context_md: str,
+    prompt: str,
+    workspace_root: Path,
+    round_id: str,
+    variant_id: str | None,
+    validator: Callable[[dict], None] | None = None,
+) -> RoleOutput:
+    """Spawn a role, then scrub any untracked, non-ignored file it left behind.
+
+    Every role returns its result as JSON on stdout; the orchestrator does ALL
+    legitimate file materialization from that parsed output AFTER this returns.
+    So any untracked, non-ignored file that appears DURING the spawn is an agent
+    side-effect — a model writing to its cwd=workspace_root under an arbitrary
+    name (e.g. repo_adapter.json at the root) — and is removed here, at the
+    source, so it can never dirty a later round's clean-worktree check. Files
+    materialized by EARLIER phases are in the pre-spawn snapshot and preserved;
+    gitignored scratch (CONTEXT.md, attempt dumps) is exempt via
+    --exclude-standard. Scrubbing is best-effort and never masks the spawn
+    result (it runs in `finally`, swallowing its own errors)."""
+    before = _untracked_nonignored(workspace_root)
+    try:
+        return _spawn_role_impl(
+            role, harness_config, context_md, prompt, workspace_root,
+            round_id, variant_id, validator)
+    finally:
+        try:
+            for rel in sorted(_untracked_nonignored(workspace_root) - before):
+                target = workspace_root / rel
+                try:
+                    if target.is_dir():
+                        shutil.rmtree(target, ignore_errors=True)
+                    else:
+                        target.unlink()
+                except FileNotFoundError:
+                    pass
+        except Exception:
+            pass
+
+
+def _spawn_role_impl(
     role: str,
     harness_config: dict,
     context_md: str,
