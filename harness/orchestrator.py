@@ -111,8 +111,32 @@ def validate_designer_json(d: dict) -> None:
             raise ValueError(
                 f"designer.json duplicate evidence id {ev_id!r}")
         evidence_ids.add(ev_id)
-    for c in d["claims"]:
-        cg.Claim.from_dict(c)  # slug + required-field checks
+    # Claim ids are assigned by the orchestrator (_assign_claim_ids overwrites
+    # whatever the designer emits), so the designer need NOT supply one —
+    # requiring a field we immediately discard is a needless failure mode.
+    # Every OTHER required field is checked, and we aggregate all problems across
+    # all claims into a single message so one correction pass can fix them all at
+    # once instead of failing on one missing field at a time.
+    claim_errors: list[str] = []
+    for i, c in enumerate(d["claims"]):
+        if not isinstance(c, dict):
+            claim_errors.append(f"claims[{i}] must be a JSON object")
+            continue
+        missing = [f for f in ("section_id", "decision_id", "claim_type",
+                               "evidence_ids", "assertion") if f not in c]
+        if missing:
+            claim_errors.append(
+                f"claims[{i}] missing required field(s): {', '.join(missing)} "
+                "(do NOT include 'id' — the harness assigns it)")
+            continue
+        try:
+            # from_dict also enforces id presence; supply a placeholder for the
+            # orchestrator-assigned id so the real checks (claim_type enum,
+            # decision_id/position slugs, conditional fields) still run.
+            cg.Claim.from_dict(c if "id" in c else {**c, "id": "cl-000000"})
+        except Exception as e:
+            claim_errors.append(f"claims[{i}]: {e}")
+            continue
         for ref in c.get("evidence_ids", []) or []:
             # A claim may cite this pass's inline evidence OR an evidence id
             # already materialized this round by the repo adapter (designer
@@ -120,9 +144,13 @@ def validate_designer_json(d: dict) -> None:
             # ev id not in the inline set; Verifier A (cite-resolution) is the
             # authority that every cite resolves to a real evidence/ev-*.md.
             if ref not in evidence_ids and not _EV_ID_RE.match(ref or ""):
-                raise ValueError(
-                    f"designer.json claim {c.get('id')} cites {ref!r} which is "
-                    "neither this pass's evidence nor a valid ev-NNNNNN id")
+                claim_errors.append(
+                    f"claims[{i}] cites {ref!r} which is neither this pass's "
+                    "evidence nor a valid ev-NNNNNN id")
+    if claim_errors:
+        raise ValueError(
+            f"designer.json has {len(claim_errors)} claim error(s):\n- "
+            + "\n- ".join(claim_errors))
 
 
 def validate_reviewer_json(d: dict) -> None:
@@ -307,14 +335,24 @@ PLANNER_PROMPT = (
 )
 
 DESIGNER_PROMPT = (
-    "You are the designer. Read the CONTEXT.md above and emit JSON with "
-    "fields: round, variant, patch_diff (unified-diff text or empty string), "
-    "evidence (list of {id, confidence, citations, claim, excerpt, ...}), "
-    "claims (list of cl-*.json dicts). "
+    "You are the designer. Read the CONTEXT.md above and emit a SINGLE JSON "
+    "object with fields: round, variant, patch_diff (unified-diff text or empty "
+    "string), evidence (list), claims (list). "
     "patch_diff MUST be a standard `git diff` unified diff that uses `a/` and "
     "`b/` path prefixes, and it may ONLY create or modify section files under "
     "variants/nodes/<variant>/doc/ for THIS variant — any hunk touching a path "
     "outside that directory rejects the whole round. "
+    "Each EVIDENCE item is an object with REQUIRED fields: id (string "
+    "'ev-NNNNNN', six digits), confidence (high|medium|low), citations (list), "
+    "claim (string), excerpt (string). "
+    "Each CLAIM is an object with REQUIRED fields: section_id (slug of the doc "
+    "section it supports), decision_id (slug), claim_type (exactly one of: "
+    "decision, observation, inference, out_of_scope, unresolved), evidence_ids "
+    "(list of 'ev-NNNNNN' strings citing this round's evidence — may be empty), "
+    "assertion (string). Conditional fields: claim_type decision|observation|"
+    "inference ALSO requires position (a slug); claim_type out_of_scope requires "
+    "out_of_scope_rationale and MUST omit position; claim_type unresolved MUST "
+    "omit position. Do NOT include a claim 'id' — the harness assigns it. "
     "Before answering, read every path listed under 'Read these first (on "
     "disk)' in the CONTEXT above; do not rely on the summary tables alone. "
     "Output ONLY valid JSON."

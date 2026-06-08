@@ -1270,6 +1270,28 @@ class ValidateDesignerStrictTest(unittest.TestCase):
                 "round": "r", "variant": "v", "patch_diff": "",
                 "evidence": [dict(ev), dict(ev)], "claims": []})
 
+    def test_claim_without_id_is_accepted(self):
+        # The orchestrator assigns claim ids (_assign_claim_ids), so a designer
+        # claim that omits 'id' must validate cleanly — requiring a discarded
+        # field was the reported failure mode.
+        orchestrator.validate_designer_json({
+            "round": "r", "variant": "v", "patch_diff": "", "evidence": [],
+            "claims": [{"section_id": "retry-policy",
+                        "decision_id": "retry-policy",
+                        "claim_type": "decision", "position": "expo-backoff",
+                        "evidence_ids": [], "assertion": "a"}]})
+
+    def test_aggregates_all_missing_claim_fields(self):
+        # All missing required fields are surfaced together (not one at a time)
+        # so a single correction pass can fix them.
+        with self.assertRaises(ValueError) as cm:
+            orchestrator.validate_designer_json({
+                "round": "r", "variant": "v", "patch_diff": "", "evidence": [],
+                "claims": [{"claim_type": "decision"}]})
+        msg = str(cm.exception)
+        for field in ("section_id", "decision_id", "evidence_ids", "assertion"):
+            self.assertIn(field, msg)
+
 
 class BadAttackRejectsNotCrashTest(unittest.TestCase):
     def setUp(self):

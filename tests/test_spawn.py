@@ -687,5 +687,50 @@ class SpawnRoleScrubTest(unittest.TestCase):
         self.assertTrue((self.td / "derived" / "cache.json").exists())  # ignored
 
 
+class SpawnRoleCorrectionPhaseTest(unittest.TestCase):
+    """On a parse/validation failure the retry is a focused CORRECTION pass: it
+    hands the model its own previous response plus the exact error and asks for a
+    surgical fix, omitting the bulky round context so the model repairs rather
+    than redoes."""
+
+    def setUp(self):
+        self.td = _Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_correction_sends_previous_output_and_error_not_context(self):
+        from harness.spawn import _RunResult
+        calls = []
+        outputs = [b'{"foo": 1}', b'{"ok": true}']  # invalid, then corrected
+
+        def fake_run(cmd, stdin_text, *a, **k):
+            calls.append(stdin_text)
+            return _RunResult(returncode=0, stdout=outputs[len(calls) - 1],
+                              stderr_tail="", elapsed_seconds=0.1, verdict="ok")
+
+        def validator(d):
+            if "ok" not in d:
+                raise ValueError("missing required field 'ok'")
+
+        with mock.patch.object(spawn, "_run_with_heartbeat",
+                               side_effect=fake_run):
+            result = spawn.spawn_role(
+                role="designer", harness_config=_make_config("ok"),
+                context_md="HUGE_CONTEXT_SENTINEL", prompt="emit the thing",
+                workspace_root=self.td, round_id="round-000001",
+                variant_id="v-001", validator=validator)
+
+        self.assertEqual(result.verdict, "ok")
+        self.assertEqual(result.retry_count, 1)
+        self.assertEqual(len(calls), 2)
+        first_stdin, correction_stdin = calls
+        self.assertIn("HUGE_CONTEXT_SENTINEL", first_stdin)
+        self.assertIn("[CORRECTION TASK]", correction_stdin)
+        self.assertIn("missing required field 'ok'", correction_stdin)
+        self.assertIn('{"foo": 1}', correction_stdin)          # prior response
+        self.assertNotIn("HUGE_CONTEXT_SENTINEL", correction_stdin)  # focused
+
+
 if __name__ == "__main__":
     unittest.main()

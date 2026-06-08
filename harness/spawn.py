@@ -380,6 +380,22 @@ def _append_diagnostic(existing_tail: str, diagnostic: str) -> str:
     return f"{existing_tail}\n{diagnostic}".strip() if existing_tail else diagnostic
 
 
+def _extract_assistant_text(stdout: bytes) -> str:
+    """Best-effort recovery of the assistant's own text from a CLI response, so
+    the correction phase can show the model what it actually produced. Unwraps
+    Claude Code's `{type: result, result: "..."}` envelope when present;
+    otherwise returns the decoded stdout verbatim."""
+    text = stdout.decode("utf-8", errors="replace")
+    try:
+        env = _json.loads(text.strip())
+    except Exception:
+        return text
+    if (isinstance(env, dict) and env.get("type") == "result"
+            and isinstance(env.get("result"), str)):
+        return env["result"]
+    return text
+
+
 def _write_attempt_files(scratch_dir: Path, role: str, attempt: str,
                          result: _RunResult, stdin_text: str) -> None:
     """Persist the full LLM exchange for one attempt to scratch (gitignored).
@@ -569,18 +585,34 @@ def _spawn_role_impl(
     except Exception as e:
         parse_error = e
 
-    # Retry once with appended hint
-    retry_prompt = (
-        prompt
-        + f"\n\nYour previous output failed schema validation: {parse_error}. "
-        + "Output ONLY valid JSON matching the schema. No prose."
+    # --- Correction phase: a focused repair pass, NOT a redo ---
+    # We hand the model back its OWN previous response plus the exact validation
+    # error and ask it to fix only what's flagged, preserving everything else.
+    # The old behavior re-ran the entire task (full CONTEXT.md + prompt), so the
+    # model regenerated from scratch and tripped a DIFFERENT field each attempt
+    # (missing id, then missing section_id, ...). We deliberately omit the large
+    # round CONTEXT.md here to keep the model on the narrow repair task — its own
+    # prior response already reflects that context.
+    prev_text = _extract_assistant_text(parse_target)
+    correction_stdin = (
+        "[CORRECTION TASK]\n"
+        "Your previous response had to be a SINGLE JSON object satisfying the "
+        "schema described below, but it FAILED validation with:\n\n"
+        f"{parse_error}\n\n"
+        "Return your previous response again, CORRECTED so it passes. Fix ONLY "
+        "what the error describes; preserve every other field exactly as it was. "
+        "Do not add, drop, or rewrite unrelated content. Output ONLY the "
+        "corrected JSON object — no prose, no markdown fences.\n\n"
+        "===== SCHEMA / TASK (reference) =====\n"
+        f"{prompt}\n\n"
+        "===== YOUR PREVIOUS RESPONSE (verbatim) =====\n"
+        f"{prev_text}\n"
     )
-    retry_stdin = context_md + "\n\n" + retry_prompt
     result3 = _run_with_heartbeat(
-        cmd, retry_stdin, spawn_timeout, silence_threshold,
+        cmd, correction_stdin, spawn_timeout, silence_threshold,
         cwd=workspace_root,
     )
-    _write_attempt_files(scratch_dir, role, "retry", result3, retry_stdin)
+    _write_attempt_files(scratch_dir, role, "retry", result3, correction_stdin)
     elapsed += result3.elapsed_seconds
     stderr_tail = result3.stderr_tail
     first_parse_diagnostic = f"first parse/validation error: {parse_error}"
