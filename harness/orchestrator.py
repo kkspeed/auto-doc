@@ -1376,20 +1376,20 @@ def _run_round_impl(
          attack_count=0,
          section_count=len(section_paths))
 
-    # ---- Phase 3: Verifier A (cite enforcement) ----
-    r_completeness = verifiers.verify_citation_completeness(variants_root)
+    # ---- Phase 3: Verifier A (mechanical: frontmatter + cite resolution) ----
+    r_frontmatter = verifiers.verify_frontmatter_wellformed(variants_root)
     r_resolution = verifiers.verify_cite_resolution(
         variants_root, evidence_root,
     )
-    failure_count_a = len(r_completeness.failures) + len(r_resolution.failures)
+    failure_count_a = len(r_frontmatter.failures) + len(r_resolution.failures)
     _log(workspace_root, "verifier_complete",
          round_id=round_id, verifier="a",
          failure_count=failure_count_a,
          verdict="pass" if failure_count_a == 0 else "fail")
     if failure_count_a > 0:
-        if r_completeness.failures:
-            reason = "uncited-claim"
-            failures = r_completeness.failures
+        if r_frontmatter.failures:
+            reason = "cross-field-fail"
+            failures = r_frontmatter.failures
         else:
             reason = "dangling-evidence"
             failures = r_resolution.failures

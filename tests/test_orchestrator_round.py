@@ -507,56 +507,34 @@ class RunRoundVerifierAFailureTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.td, ignore_errors=True)
 
-    def test_uncited_claim_verdict_phase_a_fail_reason_uncited_claim(self):
-        # Designer creates a `decided` section without a cite
+    def test_dangling_cite_rejects(self):
         doc_dir = self.ws / "variants" / "nodes" / "v-001" / "doc"
         doc_dir.mkdir(parents=True, exist_ok=True)
         (doc_dir / "01-retry.md").write_text(
             '+++\nsection_id = "retry-policy"\ntags = ["decided"]\n+++\n'
-            'Uncited assertion.\n'
-        )
+            "Body cites a missing fact [^ev-999999].\n")
         _commit_setup(self.ws)
-        # No designer evidence; the section is pre-existing
-        designer = _designer_ok(claims=[
-            {"id": "cl-000001", "section_id": "retry-policy",
-             "decision_id": "retry-policy", "claim_type": "decision",
-             "evidence_ids": [], "assertion": "x",
-             "position": "expo-backoff"},
-        ])
         with mock.patch("harness.orchestrator.spawn_role", side_effect=[
-            _planner_ok(), designer,
+            _planner_ok(), _designer_ok(), _reviewer_ok(), _verifier_c_ok(),
         ]):
             outcome = orchestrator.run_round(
-                self.ws, _harness_config(),
-                "round-000001", "v-001",
-            )
-        self.assertEqual(outcome.verdict, "phase-a-fail")
-        self.assertEqual(outcome.reason, "uncited-claim")
-
-    def test_dangling_cite_verdict_phase_a_fail_reason_dangling_evidence(self):
-        doc_dir = self.ws / "variants" / "nodes" / "v-001" / "doc"
-        doc_dir.mkdir(parents=True, exist_ok=True)
-        (doc_dir / "01-retry.md").write_text(
-            '+++\nsection_id = "retry-policy"\ntags = ["decided"]\n+++\n'
-            'Assertion with bad cite [^ev-999999].\n'
-        )
-        _commit_setup(self.ws)
-        # Designer's evidence list is empty — cite resolves to nothing
-        designer = _designer_ok(claims=[
-            {"id": "cl-000001", "section_id": "retry-policy",
-             "decision_id": "retry-policy", "claim_type": "decision",
-             "evidence_ids": [], "assertion": "x",
-             "position": "expo-backoff"},
-        ])
-        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
-            _planner_ok(), designer,
-        ]):
-            outcome = orchestrator.run_round(
-                self.ws, _harness_config(),
-                "round-000001", "v-001",
-            )
+                self.ws, _harness_config(), "round-000001", "v-001")
         self.assertEqual(outcome.verdict, "phase-a-fail")
         self.assertEqual(outcome.reason, "dangling-evidence")
+
+    def test_malformed_frontmatter_rejects(self):
+        doc_dir = self.ws / "variants" / "nodes" / "v-001" / "doc"
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        (doc_dir / "01-retry.md").write_text(
+            '+++\nsection_id = "x"\ntags = "decided"\n+++\nbody\n')
+        _commit_setup(self.ws)
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(), _reviewer_ok(), _verifier_c_ok(),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "phase-a-fail")
+        self.assertEqual(outcome.reason, "cross-field-fail")
 
 
 class RunRoundVerifierBFailureTest(unittest.TestCase):
@@ -1399,6 +1377,30 @@ class DesignerDirectWriteRoundTest(unittest.TestCase):
         patch = (self.ws / "rounds" / "round-000001" / "patch.diff").read_text()
         self.assertIn("01-retry.md", patch)
         self.assertIn("+++", patch)
+
+
+class DecidedSectionNoCiteMergesTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_decided_section_without_cites_merges(self):
+        def _writer():
+            _write_doc_section(
+                self.ws, "v-001", "01-intro", ["decided"],
+                "This section sets context and has no citations.\n")
+        with mock.patch("harness.orchestrator.spawn_role",
+                        side_effect=_spawn_seq(
+                            [_planner_ok(), _designer_ok(),
+                             _reviewer_ok(), _verifier_c_ok()],
+                            on_designer=_writer)):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "merge", outcome.detail)
 
 
 class FreshInitRoundReachesMergeTest(unittest.TestCase):
