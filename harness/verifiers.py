@@ -10,7 +10,6 @@ Public API:
     - VerifierResult
 
   Verifier A (cite enforcement, parent design SC4):
-    - verify_citation_completeness  — every decided-section assertion has a cite
     - verify_cite_resolution        — every cite resolves to non-superseded evidence
 
   Verifier B (excerpt match, parent design SC5):
@@ -20,14 +19,6 @@ Public API:
     - _normalize_text
 
 v0 trade-offs (deferred to v0.1+):
-  - Sentence splitter uses naive `.!?` boundaries; abbreviations like
-    `e.g.`, `Mr.`, version strings like `v1.2.3`, and decimals like
-    `0.92` trigger false-positive sentence boundaries. Fix path:
-    NLTK Punkt or similar smarter splitter when real overnight runs
-    surface high false-positive density.
-  - Indented code blocks (4-space) are not stripped — only fenced
-    blocks. Periods inside indented examples count as sentence
-    boundaries. Acceptable since fenced is the recommended form.
   - `excerpt_diff` is computed on normalized single-line text, so
     the unified-diff output is always single-hunk. Word-level diff
     (via ndiff) would improve debuggability.
@@ -195,75 +186,7 @@ def verify_frontmatter_wellformed(variants_nodes_root: Path) -> VerifierResult:
         verdict="fail" if failures else "pass", failures=failures)
 
 
-# ----- Verifier A.1: citation completeness ------------------------------------
-
-
-_FENCED_CODE_RE = re.compile(r"```[^\n]*\n.*?\n```", re.DOTALL)
-_HEADING_LINE_RE = re.compile(r"^#{1,6}(\s.*)?$", re.MULTILINE)
-# Markdown metadata lines — e.g. "**Status**: draft, pre-impl" or
-# "**Date**: 2026-06-08" — are document metadata, not assertions, and must not
-# be subject to the cite requirement. A metadata line is one whose first
-# non-space content (after an optional blockquote `>` or list bullet) is a bold
-# label (`**Label**`) immediately followed by a colon; one or more such
-# "**Label**: value" segments may share a line. Stripped whole, like headings,
-# before sentence-splitting so their stray sentence-final punctuation can't
-# manufacture a phantom uncited "assertion". The colon requirement is what keeps
-# this from eating emphasized prose like "**Note** the system retries."
-_METADATA_LINE_RE = re.compile(
-    r"^[ \t]*(?:[>\-*+][ \t]+)?\*\*[^*\n]+\*\*[ \t]*:.*$", re.MULTILINE)
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?:\s+|\Z)")
 _CITE_RE = re.compile(r"\[\^ev-(\d{6})\]")
-# Unicode-aware letter detection — \w with re.UNICODE matches any Unicode
-# word character (letters + digits + _). We exclude digits/underscore via
-# the second test below using unicodedata. For v0, the simpler matcher is
-# `re.compile(r"[^\W\d_]", re.UNICODE)` which means "word char that is not
-# a digit and not an underscore" — effectively any Unicode letter category.
-_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
-
-
-def verify_citation_completeness(variants_nodes_root: Path) -> VerifierResult:
-    """Every assertion sentence in a `decided` section must have at least one
-    [^ev-NNNNNN] cite.
-    """
-    failures: list[VerifierFailure] = []
-    for variant, section_path, tags, body, raw_tags in _walk_sections(variants_nodes_root):
-        if not isinstance(raw_tags, list):
-            failures.append(VerifierFailure(
-                kind="malformed-frontmatter",
-                variant=variant,
-                section_path=section_path,
-                detail=f"tags field is {type(raw_tags).__name__!r}, "
-                       "expected a list — section will be treated as "
-                       "non-decided (SC4 bypass risk)",
-            ))
-        if "decided" not in tags:
-            continue
-        prose = _FENCED_CODE_RE.sub("", body)
-        prose = _HEADING_LINE_RE.sub("", prose)
-        prose = _METADATA_LINE_RE.sub("", prose)
-        for sentence in _SENTENCE_SPLIT_RE.split(prose):
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            # Must end with sentence-final punctuation AND contain at least
-            # one letter (to skip pure-punctuation fragments).
-            if not sentence.endswith((".", "!", "?")):
-                continue
-            if not _LETTER_RE.search(sentence):
-                continue
-            if _CITE_RE.search(sentence):
-                continue
-            preview = sentence[:80].replace("\n", " ")
-            failures.append(VerifierFailure(
-                kind="uncited-claim",
-                variant=variant,
-                section_path=section_path,
-                detail=f"Sentence ends '{preview}' but has no [^ev-*] cite",
-            ))
-    return VerifierResult(
-        verdict="fail" if failures else "pass",
-        failures=failures,
-    )
 
 
 # ----- Verifier A.2: cite resolution ------------------------------------------
