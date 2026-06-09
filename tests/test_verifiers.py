@@ -545,5 +545,34 @@ class VerifyExcerptMatchTest(unittest.TestCase):
         self.assertEqual(result.verdict, "pass", f"failures: {result.failures}")
 
 
+class FrontmatterWellformedTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.variants = self.td / "variants" / "nodes"
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_list_tags_passes(self):
+        _write_section(self.variants, "v-001", "01-a", ["decided"], "body\n")
+        result = v.verify_frontmatter_wellformed(self.variants)
+        self.assertEqual(result.verdict, "pass")
+        self.assertEqual(result.failures, [])
+
+    def test_tags_not_a_list_fails(self):
+        doc = self.variants / "v-001" / "doc"
+        doc.mkdir(parents=True)
+        (doc / "01-a.md").write_text(
+            '+++\nsection_id = "x"\ntags = "decided"\n+++\nbody\n')
+        result = v.verify_frontmatter_wellformed(self.variants)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].kind, "malformed-frontmatter")
+
+    def test_missing_variants_root_passes(self):
+        result = v.verify_frontmatter_wellformed(self.td / "nope")
+        self.assertEqual(result.verdict, "pass")
+
+
 if __name__ == "__main__":
     unittest.main()

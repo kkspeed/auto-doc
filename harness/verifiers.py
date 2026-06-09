@@ -146,6 +146,54 @@ def _walk_sections(variants_nodes_root: Path):
             yield variant_dir.name, rel_path, tags, body, raw_tags
 
 
+# ----- Mechanical gate: frontmatter well-formedness --------------------------
+
+
+def verify_frontmatter_wellformed(variants_nodes_root: Path) -> VerifierResult:
+    """Every section file's +++ frontmatter must parse AND its `tags` must be a
+    list. A non-list `tags` silently reads as non-decided (grounding bypass), so
+    this is a hard gate. Walks files directly — _walk_sections silently skips the
+    malformed sections this is meant to catch."""
+    failures: list[VerifierFailure] = []
+    if not variants_nodes_root.exists():
+        return VerifierResult(verdict="pass", failures=[])
+    for variant_dir in sorted(variants_nodes_root.iterdir()):
+        if not variant_dir.is_dir() or not variant_dir.name.startswith("v-"):
+            continue
+        doc_dir = variant_dir / "doc"
+        if not doc_dir.exists():
+            continue
+        for md in sorted(doc_dir.glob("*.md")):
+            rel = str(md.relative_to(variants_nodes_root.parent.parent))
+            text = md.read_text(encoding="utf-8", errors="replace")
+            if not text.startswith("+++"):
+                failures.append(VerifierFailure(
+                    kind="malformed-frontmatter", variant=variant_dir.name,
+                    section_path=rel, detail="missing +++ frontmatter fence"))
+                continue
+            end = text.find("+++", 3)
+            if end == -1:
+                failures.append(VerifierFailure(
+                    kind="malformed-frontmatter", variant=variant_dir.name,
+                    section_path=rel, detail="unterminated +++ fence"))
+                continue
+            try:
+                meta = tomllib.loads(text[3:end])
+            except tomllib.TOMLDecodeError as e:
+                failures.append(VerifierFailure(
+                    kind="malformed-frontmatter", variant=variant_dir.name,
+                    section_path=rel, detail=f"TOML parse error: {e}"))
+                continue
+            if not isinstance(meta.get("tags", []), list):
+                failures.append(VerifierFailure(
+                    kind="malformed-frontmatter", variant=variant_dir.name,
+                    section_path=rel,
+                    detail=f"tags is {type(meta.get('tags')).__name__!r}, "
+                           "expected a list"))
+    return VerifierResult(
+        verdict="fail" if failures else "pass", failures=failures)
+
+
 # ----- Verifier A.1: citation completeness ------------------------------------
 
 
