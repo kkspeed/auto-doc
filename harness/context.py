@@ -487,6 +487,7 @@ def build_verifier_c_context(workspace_root: Path, round_id: str,
     out.append(_render_goal_and_pointers(
         title, description, [
             f"rounds/{round_id}/patch.diff",
+            f"variants/nodes/{variant_id}/doc/",
             f"variants/nodes/{variant_id}/claims/",
             "evidence/",
         ]))

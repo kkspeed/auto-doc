@@ -246,6 +246,15 @@ def validate_verifier_c_json(d: dict) -> None:
         raise ValueError(
             f"verification.json verdict must be confirm|dispute, got {d['verdict']!r}"
         )
+    # Optional diff-scoped paragraph-grounding score (feeds the scorecard's
+    # groundedness dimension). Optional-with-fallback: an omission degrades to
+    # the mechanical value rather than hard-failing the round.
+    if "groundedness" in d:
+        g = d["groundedness"]
+        if not isinstance(g, (int, float)) or not (0.0 <= g <= 1.0):
+            raise ValueError(
+                f"verification.json groundedness must be a float in [0,1], "
+                f"got {g!r}")
 
 
 def validate_seed_judge_json(d: dict) -> None:
@@ -445,11 +454,18 @@ REVIEWER_PROMPT = (
 )
 
 VERIFIER_C_PROMPT = (
-    "You are Verifier C. Read the CONTEXT.md above plus the doc patch and "
-    "cited evidence; emit JSON with fields: round, variant, verdict "
+    "You are Verifier C. Read the CONTEXT.md above plus the round's patch "
+    "(rounds/<round>/patch.diff), the FULL text of each changed section file, "
+    "and the cited evidence; emit JSON with fields: round, variant, verdict "
     "(confirm|dispute), per_claim (list of {claim_id, verdict (confirm|"
     "weak|dispute), rationale}), candidate_collisions_confirmed (list), "
-    "candidate_collisions_rejected (list). "
+    "candidate_collisions_rejected (list), groundedness (float in [0,1]). "
+    "groundedness judges ONLY the paragraphs THIS round changed (per the patch) "
+    "in sections tagged 'decided': does each changed paragraph's FACTUAL content "
+    "trace to its cited evidence? Connective/transition/framing sentences need "
+    "NO citation and must not lower the score. Do NOT judge untouched paragraphs "
+    "or non-decided sections. Use the full continuous range; reserve 0.0/1.0 for "
+    "genuine extremes. "
     "Before answering, read every path listed under 'Read these first (on "
     "disk)' in the CONTEXT above; do not rely on the summary tables alone. "
     "Output ONLY valid JSON."

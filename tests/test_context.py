@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -6,6 +7,18 @@ import unittest
 from pathlib import Path
 
 from harness import context
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _scaffold_workspace(target: Path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT) + ":" + env.get("PYTHONPATH", "")
+    subprocess.check_call(
+        ["python3", "-m", "harness", "init", str(target)],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
 
 def _write_decisions(workspace, decisions: dict, goal_version="g-01"):
@@ -363,6 +376,23 @@ class ContextPointersTest(unittest.TestCase):
         out = context.build_reviewer_context(self.td, "round-000001", "v-001")
         self.assertIn("rounds/round-000001/patch.diff", out)
         self.assertIn("Read these first", out)
+
+
+class VerifierCContextTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_context_points_at_patch_and_doc(self):
+        from harness import context as context_mod
+        ctx = context_mod.build_verifier_c_context(
+            self.ws, "round-000001", "v-001")
+        self.assertIn("rounds/round-000001/patch.diff", ctx)
+        self.assertIn("variants/nodes/v-001/doc/", ctx)
 
 
 class ContextClaimPointersTest(unittest.TestCase):

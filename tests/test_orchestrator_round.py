@@ -1651,5 +1651,22 @@ class MaterializeAtomicTest(unittest.TestCase):
         self.assertEqual(st.strip(), "", f"tree dirty after rejection: {st!r}")
 
 
+class ValidateVerifierCGroundednessTest(unittest.TestCase):
+    BASE = {"round": "r", "variant": "v", "verdict": "confirm",
+            "per_claim": []}
+
+    def test_groundedness_in_range_accepted(self):
+        orchestrator.validate_verifier_c_json({**self.BASE,
+                                               "groundedness": 0.7})
+
+    def test_groundedness_omitted_accepted(self):
+        orchestrator.validate_verifier_c_json(dict(self.BASE))
+
+    def test_groundedness_out_of_range_raises(self):
+        with self.assertRaises(ValueError):
+            orchestrator.validate_verifier_c_json({**self.BASE,
+                                                   "groundedness": 1.5})
+
+
 if __name__ == "__main__":
     unittest.main()
