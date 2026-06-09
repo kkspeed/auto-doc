@@ -188,19 +188,20 @@ def compute_dimensions(
     reviewer_goal_alignment: float,
     reviewer_technical_correctness: float,
     vc_per_claim: list[dict],
-    reviewer_groundedness: float | None = None,
+    vc_groundedness: float | None = None,
     reviewer_completeness: float | None = None,
     reviewer_coherence: float | None = None,
 ) -> dict:
     """Compute all six dimensions. Returns {dim: float} keyed by DIMENSIONS.
 
-    groundedness/completeness/coherence are LLM-judged (continuous) capped by
-    their mechanical check (see _cap); goal_alignment/technical_correctness are
-    reviewer-judged; constitution_compliance is a mechanical policy count."""
+    groundedness is Verifier-C-judged (continuous) capped by its mechanical
+    check (see _cap); completeness/coherence are reviewer-judged capped by
+    mechanical; goal_alignment/technical_correctness are reviewer-judged;
+    constitution_compliance is a mechanical policy count."""
     vc_rate = compute_vc_confirm_rate(vc_per_claim)
     return {
         "groundedness": _cap(
-            reviewer_groundedness,
+            vc_groundedness,
             compute_groundedness(variant_claims_dir, evidence_root)),
         "goal_alignment": reviewer_goal_alignment,
         "technical_correctness": compute_technical_correctness(

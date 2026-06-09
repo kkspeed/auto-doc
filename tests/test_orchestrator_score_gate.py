@@ -160,16 +160,16 @@ class ScoreGateTest(unittest.TestCase):
         rj = (self.ws / "rejections" / f"{outcome.rj_id}.md").read_text()
         self.assertIn("goal_alignment: 0.90 -> 0.20", rj)
 
-    def test_reviewer_judged_scores_flow_into_scorecard(self):
-        # A mechanically-clean round: the reviewer's continuous groundedness/
-        # completeness/coherence judgments must land in scorecard.json instead
-        # of snapping to the mechanical 1.0/0.0.
+    def test_vc_judged_groundedness_flows_into_scorecard(self):
+        # A mechanically-clean round: Verifier C's groundedness and the
+        # reviewer's completeness/coherence judgments must land in
+        # scorecard.json instead of snapping to the mechanical 1.0/0.0.
         with mock.patch("harness.orchestrator.spawn_role", side_effect=[
             _planner_ok(),
             _designer_ok(claims=self._claims()),
             _reviewer_ok(goal_alignment=0.8, technical_correctness=0.7,
-                         groundedness=0.64, completeness=0.0, coherence=0.72),
-            _verifier_c_ok(),
+                         completeness=0.0, coherence=0.72),
+            _verifier_c_ok(groundedness=0.64),
         ]):
             outcome = orchestrator.run_round(
                 self.ws, _harness_config(), "round-000001", "v-001")
@@ -178,10 +178,10 @@ class ScoreGateTest(unittest.TestCase):
             (self.ws / "variants" / "nodes" / "v-001"
              / "scorecard.json").read_text())
         dims = sc["dimensions"]
-        # claim has empty evidence_ids -> mechanically grounded (1.0), so the
-        # reviewer's 0.64 caps through; coherence has no cites -> 1.0 cap, 0.72
-        # through. completeness is mechanically 0.0 (no doc section), capping
-        # the reviewer's 0.0 to 0.0 either way.
+        # claim has empty evidence_ids -> mechanically grounded (1.0), so VC's
+        # 0.64 caps through; coherence has no cites -> 1.0 cap, 0.72 through.
+        # completeness is mechanically 0.0 (no doc section), capping the
+        # reviewer's 0.0 to 0.0 either way.
         self.assertAlmostEqual(dims["groundedness"], 0.64)
         self.assertAlmostEqual(dims["coherence"], 0.72)
 

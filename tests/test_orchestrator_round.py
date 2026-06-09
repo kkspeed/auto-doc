@@ -125,7 +125,7 @@ def _spawn_seq(results, on_designer=None):
 def _reviewer_ok(round_id="round-000001", variant="v-001",
                  decision="accept", decision_proposals=None, attacks=None,
                  rejection=None, goal_alignment=0.8,
-                 technical_correctness=0.7, groundedness=None,
+                 technical_correctness=0.7,
                  completeness=None, coherence=None):
     parsed = {
         "round": round_id, "variant": variant,
@@ -133,8 +133,7 @@ def _reviewer_ok(round_id="round-000001", variant="v-001",
         "goal_alignment": goal_alignment,
         "technical_correctness": technical_correctness,
     }
-    for key, val in (("groundedness", groundedness),
-                     ("completeness", completeness),
+    for key, val in (("completeness", completeness),
                      ("coherence", coherence)):
         if val is not None:
             parsed[key] = val
@@ -149,13 +148,17 @@ def _reviewer_ok(round_id="round-000001", variant="v-001",
 
 
 def _verifier_c_ok(round_id="round-000001", variant="v-001",
-                   verdict="confirm", per_claim=None):
-    return RoleOutput(verdict="ok", parsed={
+                   verdict="confirm", per_claim=None, groundedness=None):
+    parsed = {
         "round": round_id, "variant": variant, "verdict": verdict,
         "per_claim": per_claim or [],
         "candidate_collisions_confirmed": [],
         "candidate_collisions_rejected": [],
-    }, retry_count=0, elapsed_seconds=0.1)
+    }
+    if groundedness is not None:
+        parsed["groundedness"] = groundedness
+    return RoleOutput(verdict="ok", parsed=parsed, retry_count=0,
+                      elapsed_seconds=0.1)
 
 
 class RoundOutcomeDataclassTest(unittest.TestCase):
@@ -1038,7 +1041,7 @@ class ReviewerScoreFieldsValidatorTest(unittest.TestCase):
             orchestrator.validate_reviewer_json(d)
 
     def test_optional_judged_dims_pass_when_valid(self):
-        d = dict(self.BASE, groundedness=0.6, completeness=0.3, coherence=0.9)
+        d = dict(self.BASE, completeness=0.3, coherence=0.9)
         orchestrator.validate_reviewer_json(d)  # no raise
 
     def test_optional_judged_dim_out_of_range_raises(self):
@@ -1666,6 +1669,34 @@ class ValidateVerifierCGroundednessTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             orchestrator.validate_verifier_c_json({**self.BASE,
                                                    "groundedness": 1.5})
+
+
+class GroundednessFromVerifierCTest(unittest.TestCase):
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.ws = self.td / "ws"
+        _scaffold_workspace(self.ws)
+
+    def tearDown(self):
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_merge_scorecard_groundedness_from_vc(self):
+        claim = {"section_id": "retry-policy", "decision_id": "retry-policy",
+                 "claim_type": "decision", "evidence_ids": [],
+                 "assertion": "Use expo-backoff.", "position": "expo-backoff"}
+        with mock.patch("harness.orchestrator.spawn_role", side_effect=[
+            _planner_ok(), _designer_ok(claims=[claim]),
+            _reviewer_ok(), _verifier_c_ok(groundedness=0.55),
+        ]):
+            outcome = orchestrator.run_round(
+                self.ws, _harness_config(), "round-000001", "v-001")
+        self.assertEqual(outcome.verdict, "merge", outcome.detail)
+        sc = json.loads(
+            (self.ws / "variants" / "nodes" / "v-001"
+             / "scorecard.json").read_text())
+        # mechanical groundedness == 1.0 (claim has no evidence_ids -> resolves
+        # vacuously); min(0.55, 1.0) == 0.55.
+        self.assertEqual(sc["dimensions"]["groundedness"], 0.55)
 
 
 if __name__ == "__main__":

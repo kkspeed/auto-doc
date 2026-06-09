@@ -174,7 +174,7 @@ def validate_reviewer_json(d: dict) -> None:
     # scorecard._cap); when absent the scorecard falls back to the mechanical
     # value, so a flaky omission degrades gracefully instead of hard-failing
     # an overnight round. Validated only when supplied.
-    for key in ("groundedness", "completeness", "coherence"):
+    for key in ("completeness", "coherence"):
         if key not in d:
             continue
         v = d[key]
@@ -438,12 +438,10 @@ REVIEWER_PROMPT = (
     "propose_decision_cut → target_decision_id (slug), rationale (string). "
     "propose_canonicalization → kind, from (slug), to (slug), confidence "
     "(high|medium|low), rationale; plus scope (slug) when kind is 'position'. "
-    "Also emit five quality scores, each a float in [0,1], judged from the "
+    "Also emit four quality scores, each a float in [0,1], judged from the "
     "doc + claims + cited evidence you read: "
     "goal_alignment (how well this round's doc serves the stated goal); "
     "technical_correctness (how technically correct the cited claims are); "
-    "groundedness (how well each claim is actually supported by its cited "
-    "evidence — not merely that the cite resolves); "
     "completeness (how fully the doc covers the open/proposed decisions); "
     "coherence (how clearly and consistently the doc reads as a whole). "
     "Use the full continuous range — reserve 0.0 and 1.0 for genuine extremes, "
@@ -1641,7 +1639,7 @@ def _run_round_impl(
         reviewer_technical_correctness=reviewer_result.parsed[
             "technical_correctness"],
         vc_per_claim=vc_parsed.get("per_claim", []),
-        reviewer_groundedness=reviewer_result.parsed.get("groundedness"),
+        vc_groundedness=vc_parsed.get("groundedness"),
         reviewer_completeness=reviewer_result.parsed.get("completeness"),
         reviewer_coherence=reviewer_result.parsed.get("coherence"),
     )

@@ -186,31 +186,31 @@ class ComputeDimensionsTest(unittest.TestCase):
         base.update(kw)
         return scorecard.compute_dimensions(**base)
 
-    def test_reviewer_scores_used_when_mechanically_clean(self):
+    def test_vc_scores_used_when_mechanically_clean(self):
         # No claims/decisions/cites -> all mechanical dims are 1.0, so the
         # continuous LLM judgments come through unchanged (no 0/1 snapping).
-        dims = self._dims(reviewer_groundedness=0.62,
+        dims = self._dims(vc_groundedness=0.62,
                           reviewer_completeness=0.55,
                           reviewer_coherence=0.71)
         self.assertAlmostEqual(dims["groundedness"], 0.62)
         self.assertAlmostEqual(dims["completeness"], 0.55)
         self.assertAlmostEqual(dims["coherence"], 0.71)
 
-    def test_falls_back_to_mechanical_when_reviewer_omits(self):
-        # No reviewer judgments supplied -> prior mechanical behaviour (1.0 on
-        # empty inputs).
+    def test_falls_back_to_mechanical_when_vc_omits(self):
+        # No VC/reviewer judgments supplied -> prior mechanical behaviour (1.0
+        # on empty inputs).
         dims = self._dims()
         self.assertEqual(dims["groundedness"], 1.0)
         self.assertEqual(dims["completeness"], 1.0)
         self.assertEqual(dims["coherence"], 1.0)
 
-    def test_mechanical_defect_caps_reviewer_groundedness(self):
+    def test_mechanical_defect_caps_vc_groundedness(self):
         # One claim citing nonexistent evidence -> mechanical groundedness 0.0
-        # caps a generous reviewer score to 0.0.
+        # caps a generous VC score to 0.0.
         self.claims.mkdir(parents=True)
         (self.claims / "cl-000001.json").write_text(
             json.dumps({"evidence_ids": ["ev-999999"]}))
-        dims = self._dims(reviewer_groundedness=0.9)
+        dims = self._dims(vc_groundedness=0.9)
         self.assertEqual(dims["groundedness"], 0.0)
 
     def test_completeness_is_pure_llm_not_capped_by_section_proxy(self):
@@ -225,6 +225,23 @@ class ComputeDimensionsTest(unittest.TestCase):
     def test_completeness_falls_back_to_mechanical_when_omitted(self):
         dims = self._dims(decisions=[{"id": "retry-policy", "status": "open"}])
         self.assertEqual(dims["completeness"], 0.0)  # mechanical fallback
+
+    def test_groundedness_uses_vc_score_capped_by_mechanical(self):
+        # No claims => mechanical groundedness == 1.0; a low VC score must still
+        # pull the dimension down (min), and the reviewer score is ignored.
+        dims = scorecard.compute_dimensions(
+            variant_claims_dir=self.claims,
+            variant_doc_dir=self.doc,
+            evidence_root=self.ev,
+            decisions=[], round_actions=[],
+            reviewer_goal_alignment=0.8,
+            reviewer_technical_correctness=0.7,
+            vc_per_claim=[],
+            vc_groundedness=0.2,
+            reviewer_completeness=None,
+            reviewer_coherence=None,
+        )
+        self.assertEqual(dims["groundedness"], 0.2)
 
 
 class GateTest(unittest.TestCase):
