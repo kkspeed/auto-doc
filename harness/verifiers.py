@@ -42,7 +42,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class VerifierFailure:
-    kind: str           # "uncited-claim" | "dangling-cite" | "superseded-cite" | "excerpt-mismatch"
+    kind: str           # "malformed-frontmatter" | "dangling-cite" | "superseded-cite" | "excerpt-mismatch"
     variant: str        # "v-001"
     section_path: str   # "variants/nodes/v-001/doc/01-retry-policy.md"
     detail: str         # human-readable explanation
