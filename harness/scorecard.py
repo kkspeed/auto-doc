@@ -158,7 +158,7 @@ def _cap(llm_score: float | None, mechanical: float) -> float:
     lets the LLM's continuous judgment through instead of snapping to 1.0 —
     which is what made the old count-fraction scores binary on small inputs.
 
-    Falls back to the mechanical value when the reviewer did not judge this
+    Falls back to the mechanical value when the judging agent did not judge this
     dimension (llm_score is None), so an omitted score degrades gracefully to
     the prior behaviour rather than failing the round."""
     if llm_score is None:
@@ -167,8 +167,9 @@ def _cap(llm_score: float | None, mechanical: float) -> float:
 
 
 def _judged(llm_score: float | None, mechanical_fallback: float) -> float:
-    """Pure LLM-judged dimension: use the reviewer's continuous score directly;
-    fall back to the mechanical proxy ONLY when the reviewer omitted it.
+    """Pure LLM-judged dimension: use the LLM contributor's continuous score
+    directly; fall back to the mechanical proxy ONLY when the contributor
+    omitted it.
 
     Unlike _cap, the mechanical value is not a ceiling. Used for completeness,
     whose mechanical proxy ("a doc section's section_id literally equals the

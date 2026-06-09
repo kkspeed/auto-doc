@@ -170,10 +170,10 @@ def validate_reviewer_json(d: dict) -> None:
                 f"reviewer.json {key} must be a float in [0,1], got {v!r}"
             )
     # LLM-judged quality dimensions. Optional for backward/forward
-    # compatibility: when present they refine the mechanical score (see
-    # scorecard._cap); when absent the scorecard falls back to the mechanical
-    # value, so a flaky omission degrades gracefully instead of hard-failing
-    # an overnight round. Validated only when supplied.
+    # compatibility: when present they refine or replace the mechanical score
+    # (see scorecard._cap / _judged); when absent the scorecard falls back to
+    # the mechanical value, so a flaky omission degrades gracefully instead of
+    # hard-failing an overnight round. Validated only when supplied.
     for key in ("completeness", "coherence"):
         if key not in d:
             continue
