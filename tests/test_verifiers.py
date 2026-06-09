@@ -569,6 +569,34 @@ class FrontmatterWellformedTest(unittest.TestCase):
         self.assertEqual(len(result.failures), 1)
         self.assertEqual(result.failures[0].kind, "malformed-frontmatter")
 
+    def test_missing_fence_fails(self):
+        doc = self.variants / "v-001" / "doc"
+        doc.mkdir(parents=True)
+        (doc / "01-a.md").write_text("plain markdown\n")
+        result = v.verify_frontmatter_wellformed(self.variants)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].kind, "malformed-frontmatter")
+
+    def test_unterminated_fence_fails(self):
+        doc = self.variants / "v-001" / "doc"
+        doc.mkdir(parents=True)
+        (doc / "01-a.md").write_text('+++\nsection_id = "x"\n')
+        result = v.verify_frontmatter_wellformed(self.variants)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].kind, "malformed-frontmatter")
+
+    def test_toml_error_fails(self):
+        doc = self.variants / "v-001" / "doc"
+        doc.mkdir(parents=True)
+        (doc / "01-a.md").write_text(
+            '+++\nthis is = "not [ valid TOML\n+++\nbody\n')
+        result = v.verify_frontmatter_wellformed(self.variants)
+        self.assertEqual(result.verdict, "fail")
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.failures[0].kind, "malformed-frontmatter")
+
     def test_missing_variants_root_passes(self):
         result = v.verify_frontmatter_wellformed(self.td / "nope")
         self.assertEqual(result.verdict, "pass")

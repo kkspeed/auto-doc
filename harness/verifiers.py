@@ -184,11 +184,12 @@ def verify_frontmatter_wellformed(variants_nodes_root: Path) -> VerifierResult:
                     kind="malformed-frontmatter", variant=variant_dir.name,
                     section_path=rel, detail=f"TOML parse error: {e}"))
                 continue
-            if not isinstance(meta.get("tags", []), list):
+            raw = meta.get("tags", [])
+            if not isinstance(raw, list):
                 failures.append(VerifierFailure(
                     kind="malformed-frontmatter", variant=variant_dir.name,
                     section_path=rel,
-                    detail=f"tags is {type(meta.get('tags')).__name__!r}, "
+                    detail=f"tags is {type(raw).__name__!r}, "
                            "expected a list"))
     return VerifierResult(
         verdict="fail" if failures else "pass", failures=failures)
